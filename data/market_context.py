@@ -4,6 +4,11 @@ import numpy as np
 from config import SECTOR_ETFS, logger
 
 
+def _to_float(val):
+    """Convert pandas scalar to float safely, avoiding FutureWarning."""
+    return float(val.item()) if hasattr(val, 'item') else float(val)
+
+
 def fetch_market_context() -> dict:
     """Fetch and analyze broad market conditions: SPY, VIX, sector ETFs."""
     context = {
@@ -39,21 +44,21 @@ def _analyze_spy() -> dict:
             return _default_spy()
 
         closes = df["Close"].dropna()
-        current = float(closes.iloc[-1])
+        current = _to_float(closes.iloc[-1])
 
         # RSI(14)
         rsi = _calc_rsi(closes, 14)
 
         # SMAs
-        sma50 = float(closes.rolling(50).mean().iloc[-1])
-        sma200 = float(closes.rolling(min(200, len(closes))).mean().iloc[-1])
+        sma50 = _to_float(closes.rolling(50).mean().iloc[-1])
+        sma200 = _to_float(closes.rolling(min(200, len(closes))).mean().iloc[-1])
 
         # Drawdown from high
-        high_6m = float(closes.max())
+        high_6m = _to_float(closes.max())
         drawdown = ((current - high_6m) / high_6m) * 100
 
         # Trend
-        sma20 = float(closes.rolling(20).mean().iloc[-1])
+        sma20 = _to_float(closes.rolling(20).mean().iloc[-1])
 
         return {
             "price": round(current, 2),
@@ -78,7 +83,7 @@ def _analyze_vix() -> dict:
         if df.empty:
             return {"value": None, "level": None, "label": "unknown"}
 
-        current = float(df["Close"].iloc[-1])
+        current = _to_float(df["Close"].iloc[-1])
 
         if current < 15:
             label = "complacent"
@@ -119,8 +124,8 @@ def _analyze_sectors() -> list[dict]:
                 if len(closes) < 20:
                     continue
 
-                current = float(closes.iloc[-1])
-                high_3m = float(closes.max())
+                current = _to_float(closes.iloc[-1])
+                high_3m = _to_float(closes.max())
                 rsi = _calc_rsi(closes, 14)
                 pct_from_high = ((current - high_3m) / high_3m) * 100
 
@@ -156,10 +161,10 @@ def _calc_rsi(series: pd.Series, period: int = 14) -> float:
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0).rolling(period).mean()
     loss = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
-    last_loss = float(loss.iloc[-1])
+    last_loss = _to_float(loss.iloc[-1])
     if last_loss == 0:
         return 100.0
-    rs = float(gain.iloc[-1]) / last_loss
+    rs = _to_float(gain.iloc[-1]) / last_loss
     return 100 - (100 / (1 + rs))
 
 

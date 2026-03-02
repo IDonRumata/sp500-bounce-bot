@@ -19,7 +19,8 @@ def fetch_sp500_tickers() -> list[dict]:
 
     logger.info("Fetching S&P 500 list from Wikipedia...")
     try:
-        resp = requests.get(WIKI_URL, timeout=30)
+        headers = {"User-Agent": "sp500-bounce-bot/1.0 (compatible; Python/requests)"}
+        resp = requests.get(WIKI_URL, headers=headers, timeout=30)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
         table = soup.find("table", {"id": "constituents"})
@@ -61,6 +62,6 @@ def _fallback_top100() -> list[dict]:
         "MMM", "SYK", "AXP", "ISRG", "TJX", "BKNG", "LRCX", "PLD", "REGN", "VRTX",
         "CB", "MMC", "ZTS", "PGR", "CI", "SCHW", "SO", "DUK", "BDX", "CME",
         "CL", "SLB", "MO", "FIS", "EQIX", "APD", "ITW", "NOC", "EOG", "HUM",
-        "ATVI", "MCK", "ETN", "PNC", "WM", "EMR", "GD", "F", "GM", "USB",
+        "UBER", "MCK", "ETN", "PNC", "WM", "EMR", "GD", "F", "GM", "USB",
     ]
     return [{"symbol": s, "name": s, "sector": "Unknown"} for s in symbols]
