@@ -65,7 +65,7 @@ def format_stocks_table(stocks_data: list[dict]) -> str:
             "medium": "СРЕДНЯЯ", "low": "НИЗКАЯ", "very_low": "ОЧЕНЬ НИЗКАЯ",
         }.get(prob, prob)
 
-        link = f"https://finance.yahoo.com/quote/{symbol}"
+        link = f"https://www.tradingview.com/chart/?symbol={symbol}"
 
         msg += f"*{i}. {score_emoji} [{symbol}]({link})*\n"
         msg += f"   ${t.get('current_price', '?')} | Просадка: {t.get('drawdown_pct', '?')}%\n"
@@ -144,7 +144,7 @@ def format_watchlist(symbols: list[str]) -> str:
         return "📋 *Watchlist пуст*\n\nДобавьте тикер: `/watchlist add AAPL`"
     msg = f"📋 *Watchlist* ({len(symbols)} шт.):\n\n"
     for s in symbols:
-        link = f"https://finance.yahoo.com/quote/{s}"
+        link = f"https://www.tradingview.com/chart/?symbol={s}"
         msg += f"• [{s}]({link})\n"
     msg += "\nУправление: `/watchlist add TICKER` / `/watchlist remove TICKER`"
     return msg
