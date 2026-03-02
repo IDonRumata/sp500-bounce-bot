@@ -104,6 +104,8 @@ def run_full_analysis() -> dict | None:
     analyzed_stocks = [
         s for s in analyzed_stocks
         if s["scores"]["composite_score"] >= MIN_COMPOSITE_SCORE
+        and not (s["fundamental"].get("quality_grade") == "F"
+                 and s["scores"]["bounce_probability"] in ("low", "very_low"))
     ]
     analyzed_stocks.sort(key=lambda x: x["scores"]["composite_score"], reverse=True)
     top_stocks = analyzed_stocks[:TOP_PICKS_COUNT]

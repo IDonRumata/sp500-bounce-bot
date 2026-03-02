@@ -152,10 +152,10 @@ def quick_prefilter(symbols_with_info: list[dict], max_price: float, min_drawdow
             if drawdown > min_drawdown:  # min_drawdown is negative like -15
                 continue
 
-            # Quick RSI(14)
+            # Quick RSI(14) — EWM-based to match deep analysis
             delta = closes.diff()
-            gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+            gain = delta.where(delta > 0, 0.0).ewm(alpha=1/14, min_periods=14).mean()
+            loss = (-delta.where(delta < 0, 0.0)).ewm(alpha=1/14, min_periods=14).mean()
             rs = gain / loss.replace(0, np.nan)
             rsi = 100 - (100 / (1 + rs))
             current_rsi = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50

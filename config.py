@@ -22,10 +22,10 @@ SCHEDULE_MINUTE = int(os.getenv("SCHEDULE_MINUTE", "0"))
 
 # --- Analysis thresholds ---
 MAX_PRICE = float(os.getenv("MAX_PRICE", "200"))
-MIN_DRAWDOWN = float(os.getenv("MIN_DRAWDOWN", "-15"))
-MIN_COMPOSITE_SCORE = float(os.getenv("MIN_COMPOSITE_SCORE", "55"))
+MIN_DRAWDOWN = float(os.getenv("MIN_DRAWDOWN", "-10"))
+MIN_COMPOSITE_SCORE = float(os.getenv("MIN_COMPOSITE_SCORE", "58"))
 TOP_PICKS_COUNT = int(os.getenv("TOP_PICKS_COUNT", "7"))
-PRE_FILTER_RSI = float(os.getenv("PRE_FILTER_RSI", "40"))
+PRE_FILTER_RSI = float(os.getenv("PRE_FILTER_RSI", "45"))
 
 # --- Scoring weights ---
 WEIGHT_TECHNICAL = 0.40

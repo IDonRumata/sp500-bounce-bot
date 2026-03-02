@@ -76,7 +76,11 @@ def format_stocks_table(stocks_data: list[dict]) -> str:
         if t.get("rsi_bullish_divergence"):
             msg += " | Дивергенция!"
 
-        msg += f"\n   P/E: {f.get('pe_forward', '?')} | Рост EPS: {f.get('earnings_growth', '?')}%"
+        eg = f.get('earnings_growth')
+        eg_str = f"{eg}%" if eg is not None else "N/A"
+        pe_fwd = f.get('pe_forward')
+        pe_str = f"{pe_fwd}" if pe_fwd is not None else "N/A"
+        msg += f"\n   P/E: {pe_str} | Рост EPS: {eg_str}"
         msg += f" | Качество: {f.get('quality_grade', '?')}\n\n"
 
     msg += "⚠️ _Не является инвестиционной рекомендацией_"
