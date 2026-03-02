@@ -1,7 +1,22 @@
 import sqlite3
 import json
+import numpy as np
 from datetime import datetime
 from config import DB_PATH, logger
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """Handle numpy types for JSON serialization."""
+    def default(self, obj):
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        return super().default(obj)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -50,8 +65,8 @@ def save_report(date: str, market_regime: str, stocks: list, llm_response: str, 
     conn = get_connection()
     conn.execute(
         "INSERT INTO reports (date, market_regime, stocks_json, llm_response, scores_json) VALUES (?, ?, ?, ?, ?)",
-        (date, market_regime, json.dumps(stocks, ensure_ascii=False),
-         llm_response, json.dumps(scores, ensure_ascii=False)),
+        (date, market_regime, json.dumps(stocks, ensure_ascii=False, cls=NumpyEncoder),
+         llm_response, json.dumps(scores, ensure_ascii=False, cls=NumpyEncoder)),
     )
     conn.commit()
     conn.close()
