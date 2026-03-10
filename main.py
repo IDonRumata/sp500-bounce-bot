@@ -1,13 +1,10 @@
 """
 S&P 500 Bounce Probability Analyzer Bot
-Entry point: Telegram bot + APScheduler
+Entry point: Telegram bot + built-in job_queue scheduler
 """
 import asyncio
 import json
-from datetime import datetime
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from datetime import datetime, time as dtime
 
 from config import (
     SCHEDULE_DAYS, SCHEDULE_HOUR, SCHEDULE_MINUTE,
@@ -25,8 +22,18 @@ from scoring.scorer import compute_composite_score
 from llm.analyst import generate_analysis, generate_single_stock_analysis
 from bot.telegram_bot import (
     create_bot_application, set_analysis_callbacks,
-    send_scheduled_report,
+    send_scheduled_report, scheduled_report_job,
 )
+
+
+# --- Market regime multiplier ---
+REGIME_MULTIPLIER = {
+    "bullish": 1.0,
+    "neutral": 0.95,
+    "weak": 0.88,
+    "bearish": 0.80,
+    "panic": 0.70,
+}
 
 
 def run_full_analysis() -> dict | None:
@@ -41,7 +48,8 @@ def run_full_analysis() -> dict | None:
     # Step 1: Market context
     logger.info("Step 1: Fetching market context...")
     market_ctx = fetch_market_context()
-    logger.info(f"Market regime: {market_ctx.get('regime', '?')}")
+    regime = market_ctx.get("regime", "neutral")
+    logger.info(f"Market regime: {regime}")
 
     # Step 2: Get S&P 500 list and pre-filter
     logger.info("Step 2: Fetching S&P 500 list and pre-filtering...")
@@ -84,6 +92,24 @@ def run_full_analysis() -> dict | None:
             # Composite score
             scores = compute_composite_score(tech, fund, sent, market_ctx)
 
+            # Apply market regime multiplier
+            multiplier = REGIME_MULTIPLIER.get(regime, 0.95)
+            if multiplier < 1.0:
+                original = scores["composite_score"]
+                scores["composite_score"] = round(original * multiplier, 1)
+                # Recalculate probability label
+                cs = scores["composite_score"]
+                if cs >= 75:
+                    scores["bounce_probability"] = "high"
+                elif cs >= 60:
+                    scores["bounce_probability"] = "medium_high"
+                elif cs >= 45:
+                    scores["bounce_probability"] = "medium"
+                elif cs >= 30:
+                    scores["bounce_probability"] = "low"
+                else:
+                    scores["bounce_probability"] = "very_low"
+
             analyzed_stocks.append({
                 "technical": tech,
                 "fundamental": fund,
@@ -119,8 +145,8 @@ def run_full_analysis() -> dict | None:
             "llm_response": f"Нет акций с score >= {MIN_COMPOSITE_SCORE}.",
         }
 
-    # Step 5: GPT-4o analysis
-    logger.info("Step 5: Generating GPT-4o analysis...")
+    # Step 5: LLM analysis
+    logger.info("Step 5: Generating AI analysis...")
     llm_response = generate_analysis(top_stocks, market_ctx)
 
     # Step 6: Save to database
@@ -205,12 +231,19 @@ def run_single_analysis(ticker: str) -> dict | None:
         return {"error": str(e)}
 
 
-# Import here to avoid circular imports
-from data.price_fetcher import fetch_single_history
+def _parse_schedule_days(days_str: str) -> tuple[int, ...]:
+    """Convert 'mon,wed,fri' → (0, 2, 4) for job_queue.run_daily."""
+    day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+    days = []
+    for d in days_str.split(","):
+        d = d.strip().lower()
+        if d in day_map:
+            days.append(day_map[d])
+    return tuple(sorted(days)) if days else (0, 2, 4)
 
 
 async def main():
-    """Start the bot with scheduler."""
+    """Start the bot with built-in job_queue scheduler."""
     logger.info("Initializing S&P 500 Bounce Analyzer Bot...")
 
     # Init database
@@ -219,33 +252,30 @@ async def main():
     # Set analysis callbacks for telegram handlers
     set_analysis_callbacks(run_full_analysis, run_single_analysis)
 
-    # Create bot
+    # Create bot (post_init sets menu button + commands)
     app = create_bot_application()
 
-    # Setup scheduler
-    scheduler = AsyncIOScheduler()
-    days_map = {"mon": "mon", "tue": "tue", "wed": "wed", "thu": "thu", "fri": "fri", "sat": "sat", "sun": "sun"}
-    day_of_week = ",".join(days_map.get(d.strip().lower(), d.strip()) for d in SCHEDULE_DAYS.split(","))
-
-    async def scheduled_job():
-        bot = app.bot
-        await send_scheduled_report(bot)
-
-    scheduler.add_job(
-        scheduled_job,
-        CronTrigger(day_of_week=day_of_week, hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE),
-        id="sp500_report",
-        name="S&P 500 Auto Report",
-    )
-    scheduler.start()
-    logger.info(f"Scheduler started: {day_of_week} at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}")
-
-    # Start polling
-    logger.info("Starting Telegram bot polling...")
+    # Start application
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
 
+    # Setup scheduled reports using telegram's built-in job_queue
+    schedule_days = _parse_schedule_days(SCHEDULE_DAYS)
+    schedule_time = dtime(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, second=0)
+
+    app.job_queue.run_daily(
+        scheduled_report_job,
+        time=schedule_time,
+        days=schedule_days,
+        name="sp500_auto_report",
+    )
+
+    day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+    schedule_str = ",".join(day_names.get(d, "?") for d in schedule_days)
+    logger.info(f"Scheduler: {schedule_str} at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC")
+
+    # Start polling
+    await app.updater.start_polling()
     logger.info("Bot is running. Press Ctrl+C to stop.")
 
     # Keep running
@@ -255,7 +285,6 @@ async def main():
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
     finally:
-        scheduler.shutdown()
         await app.updater.stop()
         await app.stop()
         await app.shutdown()

@@ -1,21 +1,39 @@
+import hashlib
 import json
 from openai import OpenAI
 from config import OPENAI_API_KEY, OPENAI_MODEL, logger
+from storage.database import cache_get, cache_set
 
+CACHE_TTL = 86400  # 24 hours
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
+def _cache_key(prefix: str, data: str) -> str:
+    """Generate a cache key from data hash."""
+    h = hashlib.md5(data.encode()).hexdigest()[:12]
+    return f"llm_{prefix}_{h}"
+
+
 def generate_analysis(stocks_data: list[dict], market_context: dict) -> str:
     """
-    Send all data to GPT-4o for comprehensive bounce probability analysis.
-    stocks_data: list of dicts, each containing technical, fundamental, sentiment, scores.
-    Returns LLM response text.
+    Send all data to LLM for comprehensive bounce probability analysis.
+    Uses 24h cache to reduce API costs.
     """
     if not client:
         return "OpenAI API key not configured."
 
     prompt = _build_prompt(stocks_data, market_context)
+
+    # Check cache (same stocks + similar data = reuse)
+    symbols = sorted(s.get("scores", {}).get("symbol", "") for s in stocks_data)
+    cache_data = json.dumps({"symbols": symbols, "regime": market_context.get("regime")})
+    key = _cache_key("full", cache_data)
+
+    cached = cache_get(key)
+    if cached:
+        logger.info("LLM analysis loaded from cache (24h)")
+        return cached
 
     try:
         response = client.chat.completions.create(
@@ -27,14 +45,20 @@ def generate_analysis(stocks_data: list[dict], market_context: dict) -> str:
             temperature=0.2,
             max_tokens=4000,
         )
-        return response.choices[0].message.content or "No response"
+        result = response.choices[0].message.content or "No response"
+
+        # Cache for 24h
+        cache_set(key, result, CACHE_TTL)
+        logger.info(f"LLM analysis cached (model: {OPENAI_MODEL})")
+
+        return result
     except Exception as e:
         logger.error(f"OpenAI request failed: {e}")
         return f"AI analysis unavailable: {e}"
 
 
 def generate_single_stock_analysis(stock_data: dict, market_context: dict) -> str:
-    """Deep analysis for a single stock (/analyze command)."""
+    """Deep analysis for a single stock (/analyze command). Always fresh (no cache)."""
     if not client:
         return "OpenAI API key not configured."
 
@@ -69,7 +93,8 @@ SYSTEM_PROMPT = """Ты опытный финансовый аналитик, с
 7. Используй русский язык.
 8. Не используй символы # для заголовков (Telegram Markdown).
 9. Не придумывай данных — работай только с тем, что дано.
-10. Горизонт: 2-6 недель (среднесрочный swing)."""
+10. Горизонт: 2-6 недель (среднесрочный swing).
+11. Для каждой акции укажи growth_probability (0-100) и risk_level (0-100)."""
 
 
 def _build_prompt(stocks_data: list[dict], market_context: dict) -> str:

@@ -1,17 +1,19 @@
+import re
 import asyncio
-import json
 from datetime import datetime
-from telegram import Update
+from telegram import Update, BotCommand, MenuButtonCommands
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, logger
+from config import (
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_CHAT_IDS, logger,
+)
 from bot.formatters import (
     format_market_overview, format_stocks_table, format_ai_analysis,
     format_single_stock, format_watchlist, format_help, format_status,
 )
 from storage.database import (
-    get_last_report, save_report, get_watchlist,
+    get_last_report, get_watchlist,
     add_to_watchlist, remove_from_watchlist,
 )
 
@@ -20,11 +22,22 @@ run_full_analysis = None
 run_single_analysis = None
 bot_start_time = datetime.now()
 
+# Ticker validation pattern (1-5 uppercase letters, optionally with dash)
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
+
 
 def set_analysis_callbacks(full_fn, single_fn):
     global run_full_analysis, run_single_analysis
     run_full_analysis = full_fn
     run_single_analysis = single_fn
+
+
+def _is_authorized(update: Update) -> bool:
+    """Check if user is authorized to use the bot."""
+    if not AUTHORIZED_CHAT_IDS:
+        return True  # No restrictions if not configured
+    chat_id = str(update.effective_chat.id)
+    return chat_id in AUTHORIZED_CHAT_IDS
 
 
 async def _safe_send(context_or_bot, chat_id: str, text: str, parse_mode=ParseMode.MARKDOWN):
@@ -67,10 +80,14 @@ async def _safe_send(context_or_bot, chat_id: str, text: str, parse_mode=ParseMo
 # ---- Command Handlers ----
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
     await _safe_send(context, update.effective_chat.id, format_help())
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
     uptime = str(datetime.now() - bot_start_time).split(".")[0]
     report = get_last_report()
     last_run = report["date"] if report else None
@@ -78,14 +95,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
     chat_id = update.effective_chat.id
     report = get_last_report()
     if not report:
-        await _safe_send(context, chat_id, "📭 Отчётов пока нет. Запустите `/run`.")
+        await _safe_send(context, chat_id, "No reports yet. Run `/run`.")
         return
 
-    msg = f"📊 *Последний отчёт* — {report['date']}\n"
-    msg += f"🌍 Режим рынка: *{report.get('market_regime', '?')}*\n\n"
+    msg = f"*Last report* — {report['date']}\n"
+    msg += f"Market regime: *{report.get('market_regime', '?')}*\n\n"
 
     stocks = report.get("stocks", [])
     if stocks:
@@ -94,8 +113,7 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             score = s.get("scores", {}).get("composite_score", "?")
             price = s.get("technical", {}).get("current_price", "?")
             msg += f"{i}. *{sym}* — ${price} | Score: {score}\n"
-    msg += f"\n🧠 AI-анализ сохранён.\n"
-    msg += "⚠️ _Не является инвестиционной рекомендацией_"
+    msg += "\n_Not financial advice_"
 
     await _safe_send(context, chat_id, msg)
 
@@ -106,11 +124,13 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
     chat_id = update.effective_chat.id
     await _safe_send(context, chat_id, "🔄 *Запуск полного анализа S&P 500*\n\nЭто займёт 5-10 минут...")
 
     if not run_full_analysis:
-        await _safe_send(context, chat_id, "❌ Анализ не настроен")
+        await _safe_send(context, chat_id, "Analysis not configured")
         return
 
     try:
@@ -129,28 +149,36 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Run command failed: {e}", exc_info=True)
-        await _safe_send(context, chat_id, f"❌ *Ошибка:* {str(e)[:200]}")
+        await _safe_send(context, chat_id, "❌ *Ошибка анализа.* Повторите позже.")
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args
     if not args:
-        await _safe_send(context, chat_id, "❌ Укажите тикер: `/analyze AAPL`")
+        await _safe_send(context, chat_id, "Укажите тикер: `/analyze AAPL`")
         return
 
     ticker = args[0].upper()
+
+    # Validate ticker format (security: prevent injection)
+    if not _TICKER_RE.match(ticker):
+        await _safe_send(context, chat_id, "❌ Неверный формат тикера. Пример: `/analyze AAPL`")
+        return
+
     await _safe_send(context, chat_id, f"🔍 *Анализирую {ticker}...*\n\nЗаймёт 1-2 минуты.")
 
     if not run_single_analysis:
-        await _safe_send(context, chat_id, "❌ Анализ не настроен")
+        await _safe_send(context, chat_id, "Analysis not configured")
         return
 
     try:
         result = await asyncio.get_event_loop().run_in_executor(None, run_single_analysis, ticker)
 
         if not result or result.get("error"):
-            await _safe_send(context, chat_id, f"❌ Не удалось проанализировать {ticker}: {result.get('error', 'Unknown error')}")
+            await _safe_send(context, chat_id, f"❌ Не удалось проанализировать {ticker}")
             return
 
         messages = format_single_stock(result["stock_data"], result["llm_response"])
@@ -160,10 +188,12 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Analyze command failed for {ticker}: {e}", exc_info=True)
-        await _safe_send(context, chat_id, f"❌ *Ошибка анализа {ticker}:* {str(e)[:200]}")
+        await _safe_send(context, chat_id, f"❌ *Ошибка анализа {ticker}.* Повторите позже.")
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args
 
@@ -175,12 +205,18 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = args[0].lower()
     if action == "add" and len(args) > 1:
         ticker = args[1].upper()
+        if not _TICKER_RE.match(ticker):
+            await _safe_send(context, chat_id, "❌ Неверный формат тикера")
+            return
         if add_to_watchlist(ticker):
             await _safe_send(context, chat_id, f"✅ *{ticker}* добавлен в watchlist")
         else:
             await _safe_send(context, chat_id, f"ℹ️ *{ticker}* уже в watchlist")
     elif action == "remove" and len(args) > 1:
         ticker = args[1].upper()
+        if not _TICKER_RE.match(ticker):
+            await _safe_send(context, chat_id, "❌ Неверный формат тикера")
+            return
         if remove_from_watchlist(ticker):
             await _safe_send(context, chat_id, f"🗑 *{ticker}* удалён из watchlist")
         else:
@@ -189,8 +225,16 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(context, chat_id, "Используйте:\n`/watchlist` — показать\n`/watchlist add AAPL`\n`/watchlist remove AAPL`")
 
 
+# ---- Scheduled Report ----
+
+async def scheduled_report_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback for python-telegram-bot's job_queue (replaces APScheduler)."""
+    logger.info("Scheduled report triggered by job_queue")
+    await send_scheduled_report(context.bot)
+
+
 async def send_scheduled_report(bot):
-    """Called by scheduler to send auto-report."""
+    """Send automated report to TELEGRAM_CHAT_ID."""
     chat_id = TELEGRAM_CHAT_ID
     if not chat_id:
         logger.error("TELEGRAM_CHAT_ID not set, cannot send scheduled report")
@@ -199,7 +243,7 @@ async def send_scheduled_report(bot):
     await _safe_send(bot, chat_id, "🔄 *Автоматический анализ S&P 500...*")
 
     if not run_full_analysis:
-        await _safe_send(bot, chat_id, "❌ Анализ не настроен")
+        await _safe_send(bot, chat_id, "Analysis not configured")
         return
 
     try:
@@ -218,12 +262,38 @@ async def send_scheduled_report(bot):
 
     except Exception as e:
         logger.error(f"Scheduled report failed: {e}", exc_info=True)
-        await _safe_send(bot, chat_id, f"❌ *Ошибка авто-отчёта:* {str(e)[:200]}")
+        await _safe_send(bot, chat_id, "❌ *Ошибка авто-отчёта.* Следующая попытка по расписанию.")
+
+
+# ---- Bot Setup ----
+
+async def post_init(app: Application):
+    """Called after app.initialize() — sets up menu button and commands."""
+    # Set bot commands (shows in "/" menu)
+    commands = [
+        BotCommand("run", "Полный анализ S&P 500"),
+        BotCommand("report", "Последний отчёт"),
+        BotCommand("analyze", "Анализ одной акции"),
+        BotCommand("watchlist", "Watchlist"),
+        BotCommand("status", "Статус бота"),
+        BotCommand("help", "Справка"),
+    ]
+    await app.bot.set_my_commands(commands)
+
+    # Set menu button (☰ near text input → shows command list)
+    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+    logger.info("Bot commands and menu button configured")
 
 
 def create_bot_application() -> Application:
     """Create and configure the Telegram bot application."""
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("start", cmd_help))

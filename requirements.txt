@@ -1,12 +1,9 @@
 yfinance>=0.2.31
 pandas>=2.0
 numpy>=1.24
-python-telegram-bot>=20.0
-apscheduler>=3.10
+python-telegram-bot[job-queue]>=20.0
 openai>=1.0
-finnhub-python>=2.4
 requests>=2.31
-aiohttp>=3.9
 python-dotenv>=1.0
 beautifulsoup4>=4.12
 lxml>=4.9

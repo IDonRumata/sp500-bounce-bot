@@ -10,7 +10,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # --- OpenAI ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # --- Finnhub ---
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
@@ -48,6 +48,10 @@ SECTOR_ETFS = {
     "Materials": "XLB",
 }
 
+# --- Security: Authorized Telegram users ---
+_auth_ids = os.getenv("AUTHORIZED_CHAT_IDS", TELEGRAM_CHAT_ID)
+AUTHORIZED_CHAT_IDS = set(s.strip() for s in _auth_ids.split(",") if s.strip())
+
 # --- Paths ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "bot_data.db")
@@ -63,3 +67,6 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("sp500bot")
+
+# Suppress noisy httpx logs (contains bot token in URLs)
+logging.getLogger("httpx").setLevel(logging.WARNING)
