@@ -269,21 +269,33 @@ async def send_scheduled_report(bot):
 
 async def post_init(app: Application):
     """Called after app.initialize() — sets up menu button and commands."""
-    # Set bot commands (shows in "/" menu)
-    commands = [
-        BotCommand("run", "Полный анализ S&P 500"),
-        BotCommand("report", "Последний отчёт"),
-        BotCommand("analyze", "Анализ одной акции"),
-        BotCommand("watchlist", "Watchlist"),
-        BotCommand("status", "Статус бота"),
-        BotCommand("help", "Справка"),
-    ]
-    await app.bot.set_my_commands(commands)
+    try:
+        # Set bot commands (shows in "/" menu)
+        commands = [
+            BotCommand("run", "Полный анализ S&P 500"),
+            BotCommand("report", "Последний отчёт"),
+            BotCommand("analyze", "Анализ одной акции"),
+            BotCommand("watchlist", "Watchlist"),
+            BotCommand("status", "Статус бота"),
+            BotCommand("help", "Справка"),
+        ]
+        await app.bot.set_my_commands(commands)
+        logger.info("Bot commands registered")
 
-    # Set menu button (☰ near text input → shows command list)
-    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        # Set menu button for the authorized chat specifically
+        if TELEGRAM_CHAT_ID:
+            await app.bot.set_chat_menu_button(
+                chat_id=int(TELEGRAM_CHAT_ID),
+                menu_button=MenuButtonCommands(),
+            )
+            logger.info(f"Menu button set for chat {TELEGRAM_CHAT_ID}")
 
-    logger.info("Bot commands and menu button configured")
+        # Also set default for all new chats
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("Menu button configured (default)")
+
+    except Exception as e:
+        logger.error(f"post_init failed: {e}", exc_info=True)
 
 
 def create_bot_application() -> Application:
