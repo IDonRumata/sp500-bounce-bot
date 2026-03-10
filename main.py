@@ -20,10 +20,12 @@ from analysis.fundamental import analyze_fundamentals
 from analysis.sentiment import analyze_sentiment
 from scoring.scorer import compute_composite_score
 from llm.analyst import generate_analysis, generate_single_stock_analysis
+from telegram import BotCommand, MenuButtonCommands
 from bot.telegram_bot import (
     create_bot_application, set_analysis_callbacks,
     send_scheduled_report, scheduled_report_job,
 )
+from config import TELEGRAM_CHAT_ID as _CHAT_ID
 
 
 # --- Market regime multiplier ---
@@ -258,6 +260,25 @@ async def main():
     # Start application
     await app.initialize()
     await app.start()
+
+    # Setup menu button and commands (post_init only works with run_polling)
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("run", "Полный анализ S&P 500"),
+            BotCommand("report", "Последний отчёт"),
+            BotCommand("analyze", "Анализ одной акции"),
+            BotCommand("watchlist", "Watchlist"),
+            BotCommand("status", "Статус бота"),
+            BotCommand("help", "Справка"),
+        ])
+        if _CHAT_ID:
+            await app.bot.set_chat_menu_button(
+                chat_id=int(_CHAT_ID), menu_button=MenuButtonCommands(),
+            )
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("Menu button and commands configured")
+    except Exception as e:
+        logger.error(f"Failed to set menu/commands: {e}")
 
     # Setup scheduled reports using telegram's built-in job_queue
     schedule_days = _parse_schedule_days(SCHEDULE_DAYS)
