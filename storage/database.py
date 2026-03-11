@@ -121,12 +121,11 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS watchlist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
             symbol TEXT NOT NULL,
             added_at TEXT DEFAULT (datetime('now')),
             UNIQUE(user_id, symbol)
         );
-        CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
 
         -- Watchlist alerts history
         CREATE TABLE IF NOT EXISTS alert_history (
@@ -163,6 +162,13 @@ def init_db():
 
     # Migrate old watchlist (no user_id) → new schema
     _migrate_watchlist(conn)
+
+    # Create watchlist index AFTER migration (old table may lack user_id column)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
+        conn.commit()
+    except Exception:
+        pass  # index already exists or migration not yet applied
 
     conn.close()
     logger.info("Database initialized")
