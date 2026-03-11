@@ -33,6 +33,8 @@ def get_connection() -> sqlite3.Connection:
 
 def init_db():
     conn = get_connection()
+
+    # Phase 1: Core tables (existed before multi-user) — safe for any DB state
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,16 +120,25 @@ def init_db():
             registered_at TEXT DEFAULT (datetime('now')),
             last_active TEXT
         );
+    """)
+    conn.commit()
 
+    # Phase 2: Migrate old watchlist BEFORE creating new tables that reference user_id
+    # (old watchlist may exist without user_id column)
+    _migrate_watchlist(conn)
+
+    # Phase 3: Tables with user_id — created individually to handle legacy DB
+    _safe_create_table(conn, """
         CREATE TABLE IF NOT EXISTS watchlist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL DEFAULT '',
             symbol TEXT NOT NULL,
             added_at TEXT DEFAULT (datetime('now')),
             UNIQUE(user_id, symbol)
-        );
+        )
+    """)
 
-        -- Watchlist alerts history
+    _safe_create_table(conn, """
         CREATE TABLE IF NOT EXISTS alert_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -137,10 +148,10 @@ def init_db():
             change_pct REAL,
             rsi REAL,
             sent_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_alerts_user_ticker ON alert_history(user_id, ticker, sent_at);
+        )
+    """)
 
-        -- Portfolio tracker
+    _safe_create_table(conn, """
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -155,23 +166,32 @@ def init_db():
             pnl_pct REAL,
             pnl_abs REAL,
             created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id, status);
+        )
     """)
+
+    # Phase 4: Indexes on user_id columns (safe after migration)
+    for idx_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_alerts_user_ticker ON alert_history(user_id, ticker, sent_at)",
+        "CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id, status)",
+    ]:
+        try:
+            conn.execute(idx_sql)
+        except Exception as e:
+            logger.warning(f"Index creation skipped: {e}")
+
     conn.commit()
-
-    # Migrate old watchlist (no user_id) → new schema
-    _migrate_watchlist(conn)
-
-    # Create watchlist index AFTER migration (old table may lack user_id column)
-    try:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
-        conn.commit()
-    except Exception:
-        pass  # index already exists or migration not yet applied
-
     conn.close()
     logger.info("Database initialized")
+
+
+def _safe_create_table(conn: sqlite3.Connection, sql: str):
+    """Execute CREATE TABLE, ignore if already exists."""
+    try:
+        conn.execute(sql)
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"Table creation note: {e}")
 
 
 def _migrate_watchlist(conn: sqlite3.Connection):
