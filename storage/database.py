@@ -44,12 +44,6 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS watchlist (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT UNIQUE NOT NULL,
-            added_at TEXT DEFAULT (datetime('now'))
-        );
-
         CREATE TABLE IF NOT EXISTS cache (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -111,10 +105,82 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_rec_date ON recommendations(signal_date);
         CREATE INDEX IF NOT EXISTS idx_rec_ticker ON recommendations(ticker);
         CREATE INDEX IF NOT EXISTS idx_rec_check ON recommendations(check_date, status);
+
+        -- Multi-user support
+        CREATE TABLE IF NOT EXISTS users (
+            chat_id TEXT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            is_active INTEGER DEFAULT 1,
+            is_admin INTEGER DEFAULT 0,
+            subscribed_reports INTEGER DEFAULT 1,
+            alert_enabled INTEGER DEFAULT 1,
+            registered_at TEXT DEFAULT (datetime('now')),
+            last_active TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            added_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, symbol)
+        );
+        CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id);
+
+        -- Watchlist alerts history
+        CREATE TABLE IF NOT EXISTS alert_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            price REAL,
+            change_pct REAL,
+            rsi REAL,
+            sent_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_alerts_user_ticker ON alert_history(user_id, ticker, sent_at);
     """)
     conn.commit()
+
+    # Migrate old watchlist (no user_id) → new schema
+    _migrate_watchlist(conn)
+
     conn.close()
     logger.info("Database initialized")
+
+
+def _migrate_watchlist(conn: sqlite3.Connection):
+    """Migrate legacy watchlist rows without user_id (one-time)."""
+    try:
+        # Check if there are rows with empty user_id (old schema had no user_id column)
+        # If the old table existed with different schema, this handles the transition
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(watchlist)").fetchall()]
+        if "user_id" not in cols:
+            # Old schema detected — rebuild table
+            from config import TELEGRAM_CHAT_ID
+            logger.info("Migrating watchlist to multi-user schema...")
+            rows = conn.execute("SELECT symbol, added_at FROM watchlist").fetchall()
+            conn.execute("DROP TABLE watchlist")
+            conn.execute("""
+                CREATE TABLE watchlist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    added_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(user_id, symbol)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)")
+            for r in rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO watchlist (user_id, symbol, added_at) VALUES (?, ?, ?)",
+                    (TELEGRAM_CHAT_ID, r["symbol"], r["added_at"]),
+                )
+            conn.commit()
+            logger.info(f"Migrated {len(rows)} watchlist entries to user {TELEGRAM_CHAT_ID}")
+    except Exception as e:
+        logger.warning(f"Watchlist migration check: {e}")
 
 
 # --- Reports ---
@@ -148,12 +214,91 @@ def get_last_report() -> dict | None:
     }
 
 
-# --- Watchlist ---
+# --- Users ---
 
-def add_to_watchlist(symbol: str) -> bool:
+def register_user(chat_id: str, username: str = None, first_name: str = None) -> bool:
+    """Register or update user. Returns True if new user."""
     conn = get_connection()
     try:
-        conn.execute("INSERT OR IGNORE INTO watchlist (symbol) VALUES (?)", (symbol.upper(),))
+        existing = conn.execute("SELECT chat_id FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE users SET last_active = datetime('now'), username = COALESCE(?, username), first_name = COALESCE(?, first_name) WHERE chat_id = ?",
+                (username, first_name, chat_id),
+            )
+            conn.commit()
+            conn.close()
+            return False
+        conn.execute(
+            "INSERT INTO users (chat_id, username, first_name, last_active) VALUES (?, ?, ?, datetime('now'))",
+            (chat_id, username, first_name),
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"New user registered: {chat_id} ({username})")
+        return True
+    except Exception as e:
+        logger.error(f"register_user failed: {e}")
+        conn.close()
+        return False
+
+
+def get_user(chat_id: str) -> dict | None:
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_all_active_users() -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM users WHERE is_active = 1 ORDER BY registered_at").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_subscribed_users() -> list[str]:
+    """Get chat_ids of users subscribed to auto-reports."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT chat_id FROM users WHERE is_active = 1 AND subscribed_reports = 1"
+    ).fetchall()
+    conn.close()
+    return [r["chat_id"] for r in rows]
+
+
+def update_user_setting(chat_id: str, field: str, value) -> bool:
+    """Update a single user setting. Field must be whitelisted."""
+    allowed = {"subscribed_reports", "alert_enabled", "is_active", "is_admin"}
+    if field not in allowed:
+        return False
+    conn = get_connection()
+    conn.execute(f"UPDATE users SET {field} = ? WHERE chat_id = ?", (value, chat_id))
+    conn.commit()
+    changed = conn.total_changes > 0
+    conn.close()
+    return changed
+
+
+def set_first_admin(chat_id: str):
+    """Promote the first registered user to admin (called once at startup)."""
+    conn = get_connection()
+    admin_exists = conn.execute("SELECT 1 FROM users WHERE is_admin = 1").fetchone()
+    if not admin_exists:
+        conn.execute("UPDATE users SET is_admin = 1 WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+    conn.close()
+
+
+# --- Watchlist ---
+
+def add_to_watchlist(symbol: str, user_id: str = None) -> bool:
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO watchlist (user_id, symbol) VALUES (?, ?)",
+            (user_id or "", symbol.upper()),
+        )
         conn.commit()
         changed = conn.total_changes > 0
         conn.close()
@@ -163,20 +308,50 @@ def add_to_watchlist(symbol: str) -> bool:
         return False
 
 
-def remove_from_watchlist(symbol: str) -> bool:
+def remove_from_watchlist(symbol: str, user_id: str = None) -> bool:
     conn = get_connection()
-    cursor = conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol.upper(),))
+    cursor = conn.execute(
+        "DELETE FROM watchlist WHERE symbol = ? AND user_id = ?",
+        (symbol.upper(), user_id or ""),
+    )
     conn.commit()
     changed = cursor.rowcount > 0
     conn.close()
     return changed
 
 
-def get_watchlist() -> list[str]:
+def get_watchlist(user_id: str = None) -> list[str]:
     conn = get_connection()
-    rows = conn.execute("SELECT symbol FROM watchlist ORDER BY symbol").fetchall()
+    rows = conn.execute(
+        "SELECT symbol FROM watchlist WHERE user_id = ? ORDER BY symbol",
+        (user_id or "",),
+    ).fetchall()
     conn.close()
     return [r["symbol"] for r in rows]
+
+
+# --- Alerts ---
+
+def save_alert(user_id: str, ticker: str, alert_type: str,
+               price: float, change_pct: float, rsi: float | None):
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO alert_history (user_id, ticker, alert_type, price, change_pct, rsi) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, ticker, alert_type, price, change_pct, rsi),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_last_alert_time(user_id: str, ticker: str, alert_type: str) -> str | None:
+    """Get the most recent sent_at for this user/ticker/type combo."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT sent_at FROM alert_history WHERE user_id = ? AND ticker = ? AND alert_type = ? ORDER BY sent_at DESC LIMIT 1",
+        (user_id, ticker, alert_type),
+    ).fetchone()
+    conn.close()
+    return row["sent_at"] if row else None
 
 
 # --- Cache ---

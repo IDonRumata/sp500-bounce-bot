@@ -39,6 +39,14 @@ WEEKLY_REPORT_HOUR = int(os.getenv("WEEKLY_REPORT_HOUR", "10"))
 # --- Rate limiting ---
 CMD_COOLDOWN_SEC = int(os.getenv("CMD_COOLDOWN_SEC", "300"))
 
+# --- Watchlist alerts ---
+ALERT_ENABLED = os.getenv("ALERT_ENABLED", "true").lower() == "true"
+ALERT_INTERVAL_MIN = int(os.getenv("ALERT_INTERVAL_MIN", "15"))
+ALERT_PRICE_PCT = float(os.getenv("ALERT_PRICE_PCT", "3.0"))
+ALERT_RSI_OVERSOLD = float(os.getenv("ALERT_RSI_OVERSOLD", "30"))
+ALERT_RSI_OVERBOUGHT = float(os.getenv("ALERT_RSI_OVERBOUGHT", "75"))
+ALERT_COOLDOWN_HOURS = float(os.getenv("ALERT_COOLDOWN_HOURS", "4"))
+
 # --- Scoring weights ---
 WEIGHT_TECHNICAL = 0.40
 WEIGHT_FUNDAMENTAL = 0.30

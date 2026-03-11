@@ -225,6 +225,69 @@ def format_check_results(results: list[dict]) -> str:
     return msg
 
 
+def format_alerts(alerts: list[dict]) -> str:
+    """Format watchlist alerts for a single user."""
+    if not alerts:
+        return ""
+
+    type_emoji = {
+        "price_drop": "🔴", "price_surge": "🟢",
+        "rsi_oversold": "📉", "rsi_overbought": "📈",
+    }
+    type_label = {
+        "price_drop": "Падение", "price_surge": "Рост",
+        "rsi_oversold": "RSI перепродан", "rsi_overbought": "RSI перекуплен",
+    }
+
+    msg = f"🔔 *Алерты watchlist* ({len(alerts)})\n\n"
+    for a in alerts:
+        emoji = type_emoji.get(a["alert_type"], "❓")
+        label = type_label.get(a["alert_type"], a["alert_type"])
+        link = f"https://www.tradingview.com/chart/?symbol={a['ticker']}"
+        msg += f"{emoji} [{a['ticker']}]({link}): {label}\n"
+        msg += f"   ${a['price']} ({a['change_pct']:+.2f}%)"
+        if a.get("rsi") is not None:
+            msg += f" | RSI: {a['rsi']}"
+        msg += "\n"
+    return msg
+
+
+def format_settings(user: dict) -> str:
+    """Format user settings for /settings command."""
+    sub = "✅ Подписан" if user.get("subscribed_reports") else "❌ Отписан"
+    alert = "✅ Вкл" if user.get("alert_enabled") else "❌ Выкл"
+    role = "👑 Админ" if user.get("is_admin") else "Пользователь"
+    reg = user.get("registered_at", "?")
+    last = user.get("last_active", "?")
+    return (
+        f"⚙️ *Настройки*\n\n"
+        f"ID: `{user['chat_id']}`\n"
+        f"Имя: {user.get('first_name') or '—'} (@{user.get('username') or '—'})\n"
+        f"Роль: {role}\n\n"
+        f"📬 Авто-отчёты: {sub}\n"
+        f"🔔 Алерты: {alert}\n\n"
+        f"📅 Регистрация: {reg}\n"
+        f"🕐 Последняя активность: {last}\n\n"
+        f"_Управление:_\n"
+        f"`/subscribe` — подписаться на отчёты\n"
+        f"`/unsubscribe` — отписаться"
+    )
+
+
+def format_admin_users(users: list[dict]) -> str:
+    """Format user list for /admin users."""
+    if not users:
+        return "👥 *Пользователи*\n\nПока нет зарегистрированных пользователей."
+    msg = f"👥 *Пользователи* ({len(users)})\n\n"
+    for u in users:
+        role = "👑" if u.get("is_admin") else "👤"
+        sub = "📬" if u.get("subscribed_reports") else "🔕"
+        name = u.get("first_name") or "—"
+        uname = f"@{u['username']}" if u.get("username") else ""
+        msg += f"{role} {sub} `{u['chat_id']}` {name} {uname}\n"
+    return msg
+
+
 def format_help() -> str:
     return """📊 *S&P 500 Bounce Analyzer*
 
@@ -236,6 +299,9 @@ def format_help() -> str:
 `/watchlist` — Watchlist
 `/watchlist add TICKER` — Добавить в watchlist
 `/watchlist remove TICKER` — Убрать из watchlist
+`/subscribe` — Подписаться на авто-отчёты
+`/unsubscribe` — Отписаться от авто-отчётов
+`/settings` — Мои настройки
 `/status` — Статус бота
 `/help` — Эта справка
 

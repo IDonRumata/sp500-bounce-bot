@@ -12,12 +12,15 @@ from config import (
 from bot.formatters import (
     format_market_overview, format_stocks_table, format_ai_analysis,
     format_single_stock, format_watchlist, format_help, format_status,
-    format_stats, format_check_results,
+    format_stats, format_check_results, format_settings, format_admin_users,
+    format_alerts,
 )
 from storage.database import (
     get_last_report, get_watchlist,
     add_to_watchlist, remove_from_watchlist,
     get_stats_summary,
+    register_user, get_user, get_all_active_users,
+    get_subscribed_users, update_user_setting,
 )
 from evaluation.check_results import check_pending_results
 
@@ -40,11 +43,34 @@ def set_analysis_callbacks(full_fn, single_fn):
 
 
 def _is_authorized(update: Update) -> bool:
-    """Check if user is authorized to use the bot."""
-    if not AUTHORIZED_CHAT_IDS:
-        return True  # No restrictions if not configured
+    """Check if user is authorized. Auto-registers on first contact."""
     chat_id = str(update.effective_chat.id)
-    return chat_id in AUTHORIZED_CHAT_IDS
+    user = update.effective_user
+
+    # Whitelist gate: if AUTHORIZED_CHAT_IDS is set, only those can register
+    if AUTHORIZED_CHAT_IDS and chat_id not in AUTHORIZED_CHAT_IDS:
+        return False
+
+    # Auto-register / update activity
+    register_user(
+        chat_id,
+        username=user.username if user else None,
+        first_name=user.first_name if user else None,
+    )
+
+    # Check active flag in DB
+    db_user = get_user(chat_id)
+    if db_user and not db_user["is_active"]:
+        return False
+
+    return True
+
+
+def _is_admin(update: Update) -> bool:
+    """Check if user has admin privileges."""
+    chat_id = str(update.effective_chat.id)
+    db_user = get_user(chat_id)
+    return bool(db_user and db_user["is_admin"])
 
 
 async def _safe_send(context_or_bot, chat_id: str, text: str, parse_mode=ParseMode.MARKDOWN):
@@ -212,10 +238,11 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
     chat_id = update.effective_chat.id
+    user_id = str(chat_id)
     args = context.args
 
     if not args:
-        symbols = get_watchlist()
+        symbols = get_watchlist(user_id)
         await _safe_send(context, chat_id, format_watchlist(symbols))
         return
 
@@ -225,7 +252,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _TICKER_RE.match(ticker):
             await _safe_send(context, chat_id, "❌ Неверный формат тикера")
             return
-        if add_to_watchlist(ticker):
+        if add_to_watchlist(ticker, user_id):
             await _safe_send(context, chat_id, f"✅ *{ticker}* добавлен в watchlist")
         else:
             await _safe_send(context, chat_id, f"ℹ️ *{ticker}* уже в watchlist")
@@ -234,7 +261,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _TICKER_RE.match(ticker):
             await _safe_send(context, chat_id, "❌ Неверный формат тикера")
             return
-        if remove_from_watchlist(ticker):
+        if remove_from_watchlist(ticker, user_id):
             await _safe_send(context, chat_id, f"🗑 *{ticker}* удалён из watchlist")
         else:
             await _safe_send(context, chat_id, f"ℹ️ *{ticker}* не найден в watchlist")
@@ -254,6 +281,99 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(context, chat_id, "❌ Ошибка получения статистики.")
 
 
+# ---- Subscribe / Settings / Admin ----
+
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    chat_id = str(update.effective_chat.id)
+    update_user_setting(chat_id, "subscribed_reports", 1)
+    await _safe_send(context, update.effective_chat.id, "✅ Вы подписаны на авто-отчёты.")
+
+
+async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    chat_id = str(update.effective_chat.id)
+    update_user_setting(chat_id, "subscribed_reports", 0)
+    await _safe_send(context, update.effective_chat.id, "🔕 Вы отписаны от авто-отчётов. Команды по-прежнему доступны.")
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    chat_id = str(update.effective_chat.id)
+    user = get_user(chat_id)
+    if not user:
+        await _safe_send(context, update.effective_chat.id, "Пользователь не найден.")
+        return
+    await _safe_send(context, update.effective_chat.id, format_settings(user))
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    if not _is_admin(update):
+        await _safe_send(context, update.effective_chat.id, "⛔ Нет прав администратора.")
+        return
+
+    chat_id = update.effective_chat.id
+    args = context.args
+
+    if not args:
+        await _safe_send(context, chat_id,
+            "*Команды администратора:*\n"
+            "`/admin users` — список пользователей\n"
+            "`/admin broadcast MSG` — рассылка всем\n"
+            "`/admin ban CHAT_ID` — заблокировать\n"
+            "`/admin unban CHAT_ID` — разблокировать\n"
+            "`/admin promote CHAT_ID` — сделать админом"
+        )
+        return
+
+    action = args[0].lower()
+
+    if action == "users":
+        users = get_all_active_users()
+        await _safe_send(context, chat_id, format_admin_users(users))
+
+    elif action == "broadcast" and len(args) > 1:
+        message = " ".join(args[1:])
+        subscribers = get_subscribed_users()
+        sent = 0
+        for cid in subscribers:
+            try:
+                await _safe_send(context.bot, cid, f"📢 *Объявление:*\n\n{message}")
+                sent += 1
+            except Exception as e:
+                logger.warning(f"Broadcast failed for {cid}: {e}")
+        await _safe_send(context, chat_id, f"✅ Отправлено {sent}/{len(subscribers)} пользователям.")
+
+    elif action == "ban" and len(args) > 1:
+        target_id = args[1]
+        if update_user_setting(target_id, "is_active", 0):
+            await _safe_send(context, chat_id, f"🚫 Пользователь {target_id} заблокирован.")
+        else:
+            await _safe_send(context, chat_id, f"Пользователь {target_id} не найден.")
+
+    elif action == "unban" and len(args) > 1:
+        target_id = args[1]
+        if update_user_setting(target_id, "is_active", 1):
+            await _safe_send(context, chat_id, f"✅ Пользователь {target_id} разблокирован.")
+        else:
+            await _safe_send(context, chat_id, f"Пользователь {target_id} не найден.")
+
+    elif action == "promote" and len(args) > 1:
+        target_id = args[1]
+        if update_user_setting(target_id, "is_admin", 1):
+            await _safe_send(context, chat_id, f"👑 Пользователь {target_id} стал админом.")
+        else:
+            await _safe_send(context, chat_id, f"Пользователь {target_id} не найден.")
+
+    else:
+        await _safe_send(context, chat_id, "Неизвестная команда. `/admin` для справки.")
+
+
 # ---- Scheduled Report ----
 
 async def scheduled_report_job(context: ContextTypes.DEFAULT_TYPE):
@@ -263,49 +383,71 @@ async def scheduled_report_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_scheduled_report(bot):
-    """Send automated report to TELEGRAM_CHAT_ID."""
-    chat_id = TELEGRAM_CHAT_ID
-    if not chat_id:
-        logger.error("TELEGRAM_CHAT_ID not set, cannot send scheduled report")
+    """Send automated report to all subscribed users."""
+    subscribers = get_subscribed_users()
+    # Fallback to TELEGRAM_CHAT_ID if no subscribers yet
+    if not subscribers and TELEGRAM_CHAT_ID:
+        subscribers = [TELEGRAM_CHAT_ID]
+    if not subscribers:
+        logger.error("No subscribers and TELEGRAM_CHAT_ID not set")
         return
-
-    await _safe_send(bot, chat_id, "🔄 *Автоматический анализ S&P 500...*")
 
     if not run_full_analysis:
-        await _safe_send(bot, chat_id, "Analysis not configured")
+        for cid in subscribers:
+            await _safe_send(bot, cid, "Analysis not configured")
         return
+
+    # Notify subscribers that analysis started
+    for cid in subscribers:
+        await _safe_send(bot, cid, "🔄 *Автоматический анализ S&P 500...*")
 
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, run_full_analysis)
 
         if not result or not result.get("stocks"):
-            await _safe_send(bot, chat_id, "⚠️ По текущим критериям нет подходящих кандидатов.")
+            for cid in subscribers:
+                await _safe_send(bot, cid, "⚠️ По текущим критериям нет подходящих кандидатов.")
             return
 
-        await _safe_send(bot, chat_id, format_market_overview(result["market_context"]))
-        await asyncio.sleep(1)
-        await _safe_send(bot, chat_id, format_stocks_table(result["stocks"]))
-        await asyncio.sleep(1)
-        await _safe_send(bot, chat_id, format_ai_analysis(result["llm_response"]))
+        # Pre-format messages once, send to all
+        msg_market = format_market_overview(result["market_context"])
+        msg_stocks = format_stocks_table(result["stocks"])
+        msg_ai = format_ai_analysis(result["llm_response"])
+
+        for cid in subscribers:
+            try:
+                await _safe_send(bot, cid, msg_market)
+                await asyncio.sleep(0.5)
+                await _safe_send(bot, cid, msg_stocks)
+                await asyncio.sleep(0.5)
+                await _safe_send(bot, cid, msg_ai)
+            except Exception as e:
+                logger.warning(f"Failed to send report to {cid}: {e}")
 
     except Exception as e:
         logger.error(f"Scheduled report failed: {e}", exc_info=True)
-        await _safe_send(bot, chat_id, "❌ *Ошибка авто-отчёта.* Следующая попытка по расписанию.")
+        for cid in subscribers:
+            await _safe_send(bot, cid, "❌ *Ошибка авто-отчёта.* Следующая попытка по расписанию.")
 
 
 async def check_results_job(context: ContextTypes.DEFAULT_TYPE):
     """Job callback: check pending recommendation results after market close."""
     logger.info("Check results job triggered")
-    chat_id = TELEGRAM_CHAT_ID
-    if not chat_id:
-        return
 
     try:
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(None, check_pending_results)
         if results:
-            await _safe_send(context.bot, chat_id, format_check_results(results))
+            msg = format_check_results(results)
+            subscribers = get_subscribed_users()
+            if not subscribers and TELEGRAM_CHAT_ID:
+                subscribers = [TELEGRAM_CHAT_ID]
+            for cid in subscribers:
+                try:
+                    await _safe_send(context.bot, cid, msg)
+                except Exception as e:
+                    logger.warning(f"Failed to send check results to {cid}: {e}")
         else:
             logger.info("No pending results to report")
     except Exception as e:
@@ -315,16 +457,41 @@ async def check_results_job(context: ContextTypes.DEFAULT_TYPE):
 async def weekly_stats_job(context: ContextTypes.DEFAULT_TYPE):
     """Job callback: send weekly performance stats."""
     logger.info("Weekly stats job triggered")
-    chat_id = TELEGRAM_CHAT_ID
-    if not chat_id:
-        return
 
     try:
         stats = get_stats_summary()
         msg = "📅 *Еженедельная статистика*\n\n" + format_stats(stats)
-        await _safe_send(context.bot, chat_id, msg)
+        subscribers = get_subscribed_users()
+        if not subscribers and TELEGRAM_CHAT_ID:
+            subscribers = [TELEGRAM_CHAT_ID]
+        for cid in subscribers:
+            try:
+                await _safe_send(context.bot, cid, msg)
+            except Exception as e:
+                logger.warning(f"Failed to send weekly stats to {cid}: {e}")
     except Exception as e:
         logger.error(f"Weekly stats job failed: {e}", exc_info=True)
+
+
+async def watchlist_alert_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback: check watchlist tickers and send alerts."""
+    from alerts.watchlist_monitor import check_watchlist_alerts
+
+    try:
+        loop = asyncio.get_event_loop()
+        alerts_by_user = await loop.run_in_executor(None, check_watchlist_alerts)
+        if not alerts_by_user:
+            return
+        for uid, alerts in alerts_by_user.items():
+            try:
+                msg = format_alerts(alerts)
+                if msg:
+                    await _safe_send(context.bot, uid, msg)
+            except Exception as e:
+                logger.warning(f"Failed to send alerts to {uid}: {e}")
+        logger.info(f"Sent alerts to {len(alerts_by_user)} users")
+    except Exception as e:
+        logger.error(f"Watchlist alert job failed: {e}", exc_info=True)
 
 
 # ---- Bot Setup ----
@@ -345,6 +512,10 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
+    app.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("admin", cmd_admin))
 
     logger.info("Telegram bot application created")
     return app

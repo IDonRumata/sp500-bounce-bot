@@ -12,7 +12,7 @@ from config import (
     MIN_COMPOSITE_SCORE, TOP_PICKS_COUNT,
     WEEKLY_REPORT_DAY, WEEKLY_REPORT_HOUR, logger,
 )
-from storage.database import init_db, save_report, save_recommendations, save_market_snapshot
+from storage.database import init_db, save_report, save_recommendations, save_market_snapshot, set_first_admin, register_user
 from data.sp500_list import fetch_sp500_tickers
 from data.price_fetcher import quick_prefilter, fetch_fundamentals, fetch_single_history
 from data.market_context import fetch_market_context
@@ -26,8 +26,9 @@ from bot.telegram_bot import (
     create_bot_application, set_analysis_callbacks,
     send_scheduled_report, scheduled_report_job,
     check_results_job, weekly_stats_job,
+    watchlist_alert_job,
 )
-from config import TELEGRAM_CHAT_ID as _CHAT_ID
+from config import TELEGRAM_CHAT_ID as _CHAT_ID, ALERT_ENABLED, ALERT_INTERVAL_MIN
 
 
 # --- Market regime multiplier ---
@@ -258,6 +259,11 @@ async def main():
     # Init database
     init_db()
 
+    # Ensure the owner (TELEGRAM_CHAT_ID) is registered as admin
+    if _CHAT_ID:
+        register_user(_CHAT_ID)
+        set_first_admin(_CHAT_ID)
+
     # Set analysis callbacks for telegram handlers
     set_analysis_callbacks(run_full_analysis, run_single_analysis)
 
@@ -276,6 +282,9 @@ async def main():
             BotCommand("analyze", "Анализ одной акции"),
             BotCommand("stats", "Статистика рекомендаций"),
             BotCommand("watchlist", "Watchlist"),
+            BotCommand("subscribe", "Подписаться на отчёты"),
+            BotCommand("unsubscribe", "Отписаться от отчётов"),
+            BotCommand("settings", "Мои настройки"),
             BotCommand("status", "Статус бота"),
             BotCommand("help", "Справка"),
         ])
@@ -322,6 +331,18 @@ async def main():
     )
     weekly_str = ",".join(day_names.get(d, "?") for d in weekly_days)
     logger.info(f"Weekly stats: {weekly_str} at {WEEKLY_REPORT_HOUR:02d}:00 UTC")
+
+    # Setup watchlist alerts (repeating job)
+    if ALERT_ENABLED:
+        app.job_queue.run_repeating(
+            watchlist_alert_job,
+            interval=ALERT_INTERVAL_MIN * 60,
+            first=60,
+            name="watchlist_alerts",
+        )
+        logger.info(f"Watchlist alerts: every {ALERT_INTERVAL_MIN} min (market hours only)")
+    else:
+        logger.info("Watchlist alerts: DISABLED")
 
     # Start polling
     await app.updater.start_polling()
