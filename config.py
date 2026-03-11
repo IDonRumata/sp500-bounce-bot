@@ -69,7 +69,7 @@ SECTOR_ETFS = {
 }
 
 # --- Security: Authorized Telegram users ---
-_auth_ids = os.getenv("AUTHORIZED_CHAT_IDS", TELEGRAM_CHAT_ID)
+_auth_ids = os.getenv("AUTHORIZED_CHAT_IDS", "")
 AUTHORIZED_CHAT_IDS = set(s.strip() for s in _auth_ids.split(",") if s.strip())
 
 # --- Paths ---
