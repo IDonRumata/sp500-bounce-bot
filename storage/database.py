@@ -140,6 +140,24 @@ def init_db():
             sent_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_alerts_user_ticker ON alert_history(user_id, ticker, sent_at);
+
+        -- Portfolio tracker
+        CREATE TABLE IF NOT EXISTS portfolio (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            shares REAL NOT NULL,
+            buy_price REAL NOT NULL,
+            buy_date TEXT NOT NULL,
+            rec_id INTEGER REFERENCES recommendations(id),
+            status TEXT DEFAULT 'open',
+            sell_price REAL,
+            sell_date TEXT,
+            pnl_pct REAL,
+            pnl_abs REAL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id, status);
     """)
     conn.commit()
 
@@ -509,6 +527,75 @@ def update_recommendation_result(rec_id: int, price_at_check: float,
     """, (price_at_check, result_pct, max_price, min_price, status, rec_id))
     conn.commit()
     conn.close()
+
+
+# --- Portfolio ---
+
+def add_portfolio_position(user_id: str, ticker: str, shares: float,
+                           buy_price: float, rec_id: int | None = None) -> int | None:
+    """Add an open position. Returns row id."""
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "INSERT INTO portfolio (user_id, ticker, shares, buy_price, buy_date, rec_id) VALUES (?, ?, ?, ?, datetime('now'), ?)",
+            (user_id, ticker.upper(), shares, buy_price, rec_id),
+        )
+        conn.commit()
+        row_id = cur.lastrowid
+        conn.close()
+        return row_id
+    except Exception as e:
+        logger.error(f"add_portfolio_position failed: {e}")
+        conn.close()
+        return None
+
+
+def close_portfolio_position(user_id: str, ticker: str, sell_price: float) -> dict | None:
+    """Close the oldest open position for ticker. Returns closed position dict."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM portfolio WHERE user_id = ? AND ticker = ? AND status = 'open' ORDER BY buy_date ASC LIMIT 1",
+        (user_id, ticker.upper()),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    pnl_abs = round((sell_price - row["buy_price"]) * row["shares"], 2)
+    pnl_pct = round((sell_price / row["buy_price"] - 1) * 100, 2) if row["buy_price"] else 0
+
+    conn.execute(
+        "UPDATE portfolio SET status = 'closed', sell_price = ?, sell_date = datetime('now'), pnl_pct = ?, pnl_abs = ? WHERE id = ?",
+        (sell_price, pnl_pct, pnl_abs, row["id"]),
+    )
+    conn.commit()
+
+    result = dict(row)
+    result["sell_price"] = sell_price
+    result["pnl_pct"] = pnl_pct
+    result["pnl_abs"] = pnl_abs
+    conn.close()
+    return result
+
+
+def get_open_positions(user_id: str) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM portfolio WHERE user_id = ? AND status = 'open' ORDER BY buy_date DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_closed_positions(user_id: str, limit: int = 20) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM portfolio WHERE user_id = ? AND status = 'closed' ORDER BY sell_date DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_stats_summary() -> dict:

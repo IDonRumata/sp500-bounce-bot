@@ -252,6 +252,84 @@ def format_alerts(alerts: list[dict]) -> str:
     return msg
 
 
+def format_portfolio(positions: list[dict], summary: dict) -> str:
+    """Format open portfolio positions with live P&L."""
+    if not positions:
+        return (
+            "💼 *Портфель пуст*\n\n"
+            "Откройте позицию: `/take AAPL 5`\n"
+            "(5 акций AAPL по текущей цене)"
+        )
+
+    msg = f"💼 *Портфель* ({summary['count']} позиций)\n\n"
+
+    for p in positions:
+        ticker = p["ticker"]
+        link = f"https://www.tradingview.com/chart/?symbol={ticker}"
+        pnl_pct = p.get("pnl_pct")
+        pnl_abs = p.get("pnl_abs")
+        cur = p.get("current_price")
+
+        if pnl_pct is not None and pnl_pct >= 0:
+            emoji = "🟢"
+        elif pnl_pct is not None:
+            emoji = "🔴"
+        else:
+            emoji = "⚪"
+
+        msg += f"{emoji} [{ticker}]({link}): {p['shares']}шт @ ${p['buy_price']:.2f}\n"
+        if cur is not None:
+            msg += f"   Сейчас: ${cur:.2f} | P&L: *{pnl_pct:+.2f}%* (${pnl_abs:+.2f})\n"
+        else:
+            msg += f"   Цена недоступна\n"
+
+    # Summary
+    msg += f"\n*Итого:*\n"
+    msg += f"  Вложено: ${summary['total_invested']:,.2f}\n"
+    msg += f"  Стоимость: ${summary['total_value']:,.2f}\n"
+
+    pnl = summary["total_pnl"]
+    pnl_pct = summary["total_pnl_pct"]
+    pnl_emoji = "📈" if pnl >= 0 else "📉"
+    msg += f"  {pnl_emoji} P&L: *{pnl_pct:+.2f}%* (${pnl:+,.2f})\n"
+
+    best = summary.get("best")
+    worst = summary.get("worst")
+    if best:
+        msg += f"\n  🏆 Лучшая: *{best['ticker']}* ({best['pnl_pct']:+.2f}%)"
+    if worst:
+        msg += f"\n  💀 Худшая: *{worst['ticker']}* ({worst['pnl_pct']:+.2f}%)"
+
+    return msg
+
+
+def format_portfolio_history(trades: list[dict]) -> str:
+    """Format closed trades history."""
+    if not trades:
+        return "📜 *История сделок*\n\nЗакрытых позиций нет."
+
+    msg = f"📜 *История сделок* ({len(trades)})\n\n"
+    total_pnl = 0
+    wins = 0
+
+    for t in trades:
+        pnl = t.get("pnl_pct", 0) or 0
+        pnl_abs = t.get("pnl_abs", 0) or 0
+        total_pnl += pnl_abs
+        if pnl >= 0:
+            wins += 1
+        emoji = "✅" if pnl >= 0 else "❌"
+        msg += (
+            f"{emoji} *{t['ticker']}*: {t['shares']}шт "
+            f"${t['buy_price']:.2f} → ${t.get('sell_price', 0):.2f} "
+            f"(*{pnl:+.2f}%*, ${pnl_abs:+.2f})\n"
+        )
+
+    win_rate = round(wins / len(trades) * 100, 1) if trades else 0
+    msg += f"\n*Итого:* ${total_pnl:+,.2f} | Win rate: {win_rate}%"
+    return msg
+
+
 def format_settings(user: dict) -> str:
     """Format user settings for /settings command."""
     sub = "✅ Подписан" if user.get("subscribed_reports") else "❌ Отписан"
@@ -299,6 +377,10 @@ def format_help() -> str:
 `/watchlist` — Watchlist
 `/watchlist add TICKER` — Добавить в watchlist
 `/watchlist remove TICKER` — Убрать из watchlist
+`/take TICKER QTY` — Купить (напр. `/take AAPL 5`)
+`/sell TICKER` — Продать позицию
+`/portfolio` — Открытые позиции с P&L
+`/portfolio history` — История закрытых сделок
 `/subscribe` — Подписаться на авто-отчёты
 `/unsubscribe` — Отписаться от авто-отчётов
 `/settings` — Мои настройки

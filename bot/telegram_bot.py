@@ -13,7 +13,7 @@ from bot.formatters import (
     format_market_overview, format_stocks_table, format_ai_analysis,
     format_single_stock, format_watchlist, format_help, format_status,
     format_stats, format_check_results, format_settings, format_admin_users,
-    format_alerts,
+    format_alerts, format_portfolio, format_portfolio_history,
 )
 from storage.database import (
     get_last_report, get_watchlist,
@@ -374,6 +374,147 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(context, chat_id, "Неизвестная команда. `/admin` для справки.")
 
 
+# ---- Portfolio Commands ----
+
+async def cmd_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /take TICKER QTY — open a position at current price."""
+    if not _is_authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    user_id = str(chat_id)
+    args = context.args
+
+    if not args or len(args) < 2:
+        await _safe_send(context, chat_id, "Использование: `/take AAPL 5` (5 акций AAPL)")
+        return
+
+    ticker = args[0].upper()
+    if not _TICKER_RE.match(ticker):
+        await _safe_send(context, chat_id, "❌ Неверный формат тикера")
+        return
+
+    try:
+        shares = float(args[1])
+        if shares <= 0:
+            raise ValueError
+    except ValueError:
+        await _safe_send(context, chat_id, "❌ Количество должно быть положительным числом")
+        return
+
+    await _safe_send(context, chat_id, f"⏳ Получаю цену *{ticker}*...")
+
+    from portfolio.tracker import fetch_current_price, add_position
+
+    try:
+        price = await asyncio.get_event_loop().run_in_executor(None, fetch_current_price, ticker)
+        if not price:
+            await _safe_send(context, chat_id, f"❌ Не удалось получить цену *{ticker}*")
+            return
+
+        ok = add_position(user_id, ticker, shares, price)
+        if ok:
+            total = round(price * shares, 2)
+            await _safe_send(context, chat_id,
+                f"✅ *Позиция открыта*\n\n"
+                f"*{ticker}*: {shares} шт. × ${price:.2f} = ${total:,.2f}\n\n"
+                f"Смотреть: `/portfolio`"
+            )
+        else:
+            await _safe_send(context, chat_id, "❌ Ошибка сохранения позиции")
+    except Exception as e:
+        logger.error(f"cmd_take failed: {e}", exc_info=True)
+        await _safe_send(context, chat_id, "❌ Ошибка. Повторите позже.")
+
+
+async def cmd_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /sell TICKER — close oldest open position at current price."""
+    if not _is_authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    user_id = str(chat_id)
+    args = context.args
+
+    if not args:
+        await _safe_send(context, chat_id, "Использование: `/sell AAPL`")
+        return
+
+    ticker = args[0].upper()
+    if not _TICKER_RE.match(ticker):
+        await _safe_send(context, chat_id, "❌ Неверный формат тикера")
+        return
+
+    await _safe_send(context, chat_id, f"⏳ Получаю цену *{ticker}*...")
+
+    from portfolio.tracker import fetch_current_price, close_position
+
+    try:
+        price = await asyncio.get_event_loop().run_in_executor(None, fetch_current_price, ticker)
+        if not price:
+            await _safe_send(context, chat_id, f"❌ Не удалось получить цену *{ticker}*")
+            return
+
+        result = close_position(user_id, ticker, price)
+        if not result:
+            await _safe_send(context, chat_id, f"❌ Нет открытой позиции по *{ticker}*")
+            return
+
+        pnl_emoji = "📈" if result["pnl_pct"] >= 0 else "📉"
+        await _safe_send(context, chat_id,
+            f"✅ *Позиция закрыта*\n\n"
+            f"*{ticker}*: {result['shares']} шт.\n"
+            f"Покупка: ${result['buy_price']:.2f} → Продажа: ${price:.2f}\n"
+            f"{pnl_emoji} P&L: *{result['pnl_pct']:+.2f}%* (${result['pnl_abs']:+.2f})\n\n"
+            f"История: `/portfolio history`"
+        )
+    except Exception as e:
+        logger.error(f"cmd_sell failed: {e}", exc_info=True)
+        await _safe_send(context, chat_id, "❌ Ошибка. Повторите позже.")
+
+
+async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /portfolio [history] — show positions or history."""
+    if not _is_authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    user_id = str(chat_id)
+    args = context.args
+
+    if args and args[0].lower() == "history":
+        from storage.database import get_closed_positions
+        try:
+            trades = await asyncio.get_event_loop().run_in_executor(
+                None, get_closed_positions, user_id,
+            )
+            await _safe_send(context, chat_id, format_portfolio_history(trades))
+        except Exception as e:
+            logger.error(f"cmd_portfolio history failed: {e}", exc_info=True)
+            await _safe_send(context, chat_id, "❌ Ошибка загрузки истории.")
+        return
+
+    # Show open positions with live prices
+    from storage.database import get_open_positions
+    from portfolio.tracker import refresh_prices, get_portfolio_summary
+
+    await _safe_send(context, chat_id, "⏳ Загружаю портфель...")
+
+    try:
+        positions = await asyncio.get_event_loop().run_in_executor(
+            None, get_open_positions, user_id,
+        )
+        if not positions:
+            await _safe_send(context, chat_id, format_portfolio([], {}))
+            return
+
+        enriched = await asyncio.get_event_loop().run_in_executor(
+            None, refresh_prices, positions,
+        )
+        summary = get_portfolio_summary(enriched)
+        await _safe_send(context, chat_id, format_portfolio(enriched, summary))
+    except Exception as e:
+        logger.error(f"cmd_portfolio failed: {e}", exc_info=True)
+        await _safe_send(context, chat_id, "❌ Ошибка загрузки портфеля.")
+
+
 # ---- Scheduled Report ----
 
 async def scheduled_report_job(context: ContextTypes.DEFAULT_TYPE):
@@ -512,6 +653,9 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
+    app.add_handler(CommandHandler("take", cmd_take))
+    app.add_handler(CommandHandler("sell", cmd_sell))
+    app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("settings", cmd_settings))
