@@ -101,6 +101,20 @@ def full_technical_analysis(df: pd.DataFrame, symbol: str = "") -> dict:
 
 # ---- Indicator implementations ----
 
+def calc_rsi(series: pd.Series, period: int = 14) -> float:
+    """Calculate RSI using EWM (Exponential Weighted Moving Average).
+    Public API — used by market_context.py and price_fetcher.py too.
+    """
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0).ewm(alpha=1/period, min_periods=period).mean()
+    loss = (-delta.where(delta < 0, 0.0)).ewm(alpha=1/period, min_periods=period).mean()
+    last_loss = float(loss.iloc[-1])
+    if last_loss == 0:
+        return 100.0
+    rs = float(gain.iloc[-1]) / last_loss
+    return 100 - (100 / (1 + rs))
+
+
 def _rsi(series: pd.Series, period: int = 14) -> float:
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0).ewm(alpha=1/period, min_periods=period).mean()

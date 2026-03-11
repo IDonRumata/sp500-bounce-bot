@@ -6,21 +6,28 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 
 from config import (
-    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_CHAT_IDS, logger,
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AUTHORIZED_CHAT_IDS,
+    CMD_COOLDOWN_SEC, logger,
 )
 from bot.formatters import (
     format_market_overview, format_stocks_table, format_ai_analysis,
     format_single_stock, format_watchlist, format_help, format_status,
+    format_stats, format_check_results,
 )
 from storage.database import (
     get_last_report, get_watchlist,
     add_to_watchlist, remove_from_watchlist,
+    get_stats_summary,
 )
+from evaluation.check_results import check_pending_results
 
 # Will be set by main.py
 run_full_analysis = None
 run_single_analysis = None
 bot_start_time = datetime.now()
+
+# Rate limiting for /run
+_last_run_time: dict[str, datetime] = {}
 
 # Ticker validation pattern (1-5 uppercase letters, optionally with dash)
 _TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
@@ -127,6 +134,16 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
     chat_id = update.effective_chat.id
+
+    # Rate limiting
+    now = datetime.now()
+    last = _last_run_time.get(str(chat_id))
+    if last and (now - last).total_seconds() < CMD_COOLDOWN_SEC:
+        remaining = int(CMD_COOLDOWN_SEC - (now - last).total_seconds())
+        await _safe_send(context, chat_id, f"⏳ Подождите {remaining} сек. перед повторным запуском.")
+        return
+    _last_run_time[str(chat_id)] = now
+
     await _safe_send(context, chat_id, "🔄 *Запуск полного анализа S&P 500*\n\nЭто займёт 5-10 минут...")
 
     if not run_full_analysis:
@@ -225,6 +242,18 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(context, chat_id, "Используйте:\n`/watchlist` — показать\n`/watchlist add AAPL`\n`/watchlist remove AAPL`")
 
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    try:
+        stats = get_stats_summary()
+        await _safe_send(context, chat_id, format_stats(stats))
+    except Exception as e:
+        logger.error(f"Stats command failed: {e}", exc_info=True)
+        await _safe_send(context, chat_id, "❌ Ошибка получения статистики.")
+
+
 # ---- Scheduled Report ----
 
 async def scheduled_report_job(context: ContextTypes.DEFAULT_TYPE):
@@ -265,45 +294,46 @@ async def send_scheduled_report(bot):
         await _safe_send(bot, chat_id, "❌ *Ошибка авто-отчёта.* Следующая попытка по расписанию.")
 
 
-# ---- Bot Setup ----
+async def check_results_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback: check pending recommendation results after market close."""
+    logger.info("Check results job triggered")
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
 
-async def post_init(app: Application):
-    """Called after app.initialize() — sets up menu button and commands."""
     try:
-        # Set bot commands (shows in "/" menu)
-        commands = [
-            BotCommand("run", "Полный анализ S&P 500"),
-            BotCommand("report", "Последний отчёт"),
-            BotCommand("analyze", "Анализ одной акции"),
-            BotCommand("watchlist", "Watchlist"),
-            BotCommand("status", "Статус бота"),
-            BotCommand("help", "Справка"),
-        ]
-        await app.bot.set_my_commands(commands)
-        logger.info("Bot commands registered")
-
-        # Set menu button for the authorized chat specifically
-        if TELEGRAM_CHAT_ID:
-            await app.bot.set_chat_menu_button(
-                chat_id=int(TELEGRAM_CHAT_ID),
-                menu_button=MenuButtonCommands(),
-            )
-            logger.info(f"Menu button set for chat {TELEGRAM_CHAT_ID}")
-
-        # Also set default for all new chats
-        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-        logger.info("Menu button configured (default)")
-
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, check_pending_results)
+        if results:
+            await _safe_send(context.bot, chat_id, format_check_results(results))
+        else:
+            logger.info("No pending results to report")
     except Exception as e:
-        logger.error(f"post_init failed: {e}", exc_info=True)
+        logger.error(f"Check results job failed: {e}", exc_info=True)
 
+
+async def weekly_stats_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback: send weekly performance stats."""
+    logger.info("Weekly stats job triggered")
+    chat_id = TELEGRAM_CHAT_ID
+    if not chat_id:
+        return
+
+    try:
+        stats = get_stats_summary()
+        msg = "📅 *Еженедельная статистика*\n\n" + format_stats(stats)
+        await _safe_send(context.bot, chat_id, msg)
+    except Exception as e:
+        logger.error(f"Weekly stats job failed: {e}", exc_info=True)
+
+
+# ---- Bot Setup ----
 
 def create_bot_application() -> Application:
     """Create and configure the Telegram bot application."""
     app = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
         .build()
     )
 
@@ -313,6 +343,7 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("run", cmd_run))
     app.add_handler(CommandHandler("analyze", cmd_analyze))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
 
     logger.info("Telegram bot application created")

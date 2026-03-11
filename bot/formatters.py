@@ -1,4 +1,13 @@
+import re
 from datetime import datetime
+
+
+def _escape_md(text: str) -> str:
+    """Escape Telegram Markdown special characters in user data."""
+    if not isinstance(text, str):
+        return str(text)
+    # Escape *_`[]() which have meaning in Telegram Markdown
+    return re.sub(r'([*_`\[\]()])', r'\\\1', text)
 
 
 def format_market_overview(market_ctx: dict) -> str:
@@ -150,6 +159,72 @@ def format_watchlist(symbols: list[str]) -> str:
     return msg
 
 
+def format_stats(stats: dict) -> str:
+    """Format recommendation statistics for /stats command."""
+    total = stats.get("total_all", 0)
+    if total == 0:
+        return "📊 *Статистика рекомендаций*\n\nДанных пока нет. Запустите `/run` для первого анализа."
+
+    checked = stats.get("total_checked", 0)
+    pending = stats.get("pending", 0)
+    success = stats.get("success", 0)
+    neutral = stats.get("neutral", 0)
+    failure = stats.get("failure", 0)
+    success_pct = stats.get("success_pct", 0)
+    avg_pct = stats.get("avg_result_pct")
+
+    msg = f"📊 *Статистика рекомендаций*\n\n"
+    msg += f"Всего: *{total}* | Проверено: *{checked}* | Ожидают: *{pending}*\n\n"
+
+    if checked > 0:
+        msg += f"✅ Успех (+3%): *{success}* ({success_pct}%)\n"
+        msg += f"➖ Нейтрально: *{neutral}*\n"
+        msg += f"❌ Неудача (-3%): *{failure}*\n"
+        if avg_pct is not None:
+            msg += f"\n📈 Средний результат: *{avg_pct:+.2f}%*\n"
+
+        # Best / worst
+        best = stats.get("best")
+        worst = stats.get("worst")
+        if best:
+            msg += f"\n🏆 Лучшая: *{best['ticker']}* ({best['result_pct']:+.2f}%) от {best['signal_date']}"
+        if worst:
+            msg += f"\n💀 Худшая: *{worst['ticker']}* ({worst['result_pct']:+.2f}%) от {worst['signal_date']}"
+
+        # Score bins correlation
+        bins = stats.get("score_bins", [])
+        if bins:
+            msg += "\n\n*Score → Win rate:*\n"
+            for b in bins:
+                total_bin = b["total"]
+                successes = b["successes"]
+                win_rate = round(successes / total_bin * 100, 1) if total_bin > 0 else 0
+                msg += f"  {b['score_bin']}: {successes}/{total_bin} ({win_rate}%)\n"
+
+    return msg
+
+
+def format_check_results(results: list[dict]) -> str:
+    """Format check results for Telegram notification."""
+    if not results:
+        return ""
+
+    success_count = sum(1 for r in results if r["status"] == "success")
+    failure_count = sum(1 for r in results if r["status"] == "failure")
+
+    msg = f"📋 *Проверка рекомендаций* ({len(results)} шт.)\n\n"
+
+    for r in results:
+        status_emoji = {"success": "✅", "failure": "❌", "neutral": "➖"}.get(r["status"], "❓")
+        msg += f"{status_emoji} *{r['ticker']}*: "
+        msg += f"${r['price_at_signal']:.2f} → ${r['price_at_check']:.2f} "
+        msg += f"(*{r['result_pct']:+.2f}%*)\n"
+        msg += f"   Score: {r['composite_score']} | от {r['signal_date']}\n"
+
+    msg += f"\nИтого: ✅{success_count} ❌{failure_count} ➖{len(results) - success_count - failure_count}"
+    return msg
+
+
 def format_help() -> str:
     return """📊 *S&P 500 Bounce Analyzer*
 
@@ -157,6 +232,7 @@ def format_help() -> str:
 `/run` — Полный анализ (5-10 мин)
 `/report` — Последний отчёт
 `/analyze TICKER` — Анализ одной акции
+`/stats` — Статистика рекомендаций
 `/watchlist` — Watchlist
 `/watchlist add TICKER` — Добавить в watchlist
 `/watchlist remove TICKER` — Убрать из watchlist

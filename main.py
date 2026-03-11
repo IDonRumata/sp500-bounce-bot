@@ -9,9 +9,10 @@ from datetime import datetime, time as dtime
 from config import (
     SCHEDULE_DAYS, SCHEDULE_HOUR, SCHEDULE_MINUTE,
     MAX_PRICE, MIN_DRAWDOWN, PRE_FILTER_RSI,
-    MIN_COMPOSITE_SCORE, TOP_PICKS_COUNT, logger,
+    MIN_COMPOSITE_SCORE, TOP_PICKS_COUNT,
+    WEEKLY_REPORT_DAY, WEEKLY_REPORT_HOUR, logger,
 )
-from storage.database import init_db, save_report
+from storage.database import init_db, save_report, save_recommendations, save_market_snapshot
 from data.sp500_list import fetch_sp500_tickers
 from data.price_fetcher import quick_prefilter, fetch_fundamentals, fetch_single_history
 from data.market_context import fetch_market_context
@@ -24,6 +25,7 @@ from telegram import BotCommand, MenuButtonCommands
 from bot.telegram_bot import (
     create_bot_application, set_analysis_callbacks,
     send_scheduled_report, scheduled_report_job,
+    check_results_job, weekly_stats_job,
 )
 from config import TELEGRAM_CHAT_ID as _CHAT_ID
 
@@ -173,6 +175,11 @@ def run_full_analysis() -> dict | None:
         scores=[s["scores"] for s in top_stocks],
     )
 
+    # Step 7: Save individual recommendations for tracking
+    logger.info("Step 7: Saving recommendations for tracking...")
+    save_recommendations(stocks_for_storage, market_ctx, today)
+    save_market_snapshot(market_ctx, today, len(candidates), len(top_stocks))
+
     logger.info("=" * 60)
     logger.info(f"ANALYSIS COMPLETE: {len(top_stocks)} stocks found")
     logger.info("=" * 60)
@@ -267,6 +274,7 @@ async def main():
             BotCommand("run", "Полный анализ S&P 500"),
             BotCommand("report", "Последний отчёт"),
             BotCommand("analyze", "Анализ одной акции"),
+            BotCommand("stats", "Статистика рекомендаций"),
             BotCommand("watchlist", "Watchlist"),
             BotCommand("status", "Статус бота"),
             BotCommand("help", "Справка"),
@@ -294,6 +302,26 @@ async def main():
     day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
     schedule_str = ",".join(day_names.get(d, "?") for d in schedule_days)
     logger.info(f"Scheduler: {schedule_str} at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC")
+
+    # Setup daily result checking (Mon-Fri 18:00 UTC, after market close)
+    app.job_queue.run_daily(
+        check_results_job,
+        time=dtime(hour=18, minute=0, second=0),
+        days=(0, 1, 2, 3, 4),
+        name="check_results",
+    )
+    logger.info("Result checker: Mon-Fri at 18:00 UTC")
+
+    # Setup weekly stats report
+    weekly_days = _parse_schedule_days(WEEKLY_REPORT_DAY)
+    app.job_queue.run_daily(
+        weekly_stats_job,
+        time=dtime(hour=WEEKLY_REPORT_HOUR, minute=0, second=0),
+        days=weekly_days,
+        name="weekly_stats",
+    )
+    weekly_str = ",".join(day_names.get(d, "?") for d in weekly_days)
+    logger.info(f"Weekly stats: {weekly_str} at {WEEKLY_REPORT_HOUR:02d}:00 UTC")
 
     # Start polling
     await app.updater.start_polling()

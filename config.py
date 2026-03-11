@@ -27,6 +27,18 @@ MIN_COMPOSITE_SCORE = float(os.getenv("MIN_COMPOSITE_SCORE", "58"))
 TOP_PICKS_COUNT = int(os.getenv("TOP_PICKS_COUNT", "7"))
 PRE_FILTER_RSI = float(os.getenv("PRE_FILTER_RSI", "45"))
 
+# --- Result checking ---
+CHECK_PERIOD_DAYS = int(os.getenv("CHECK_PERIOD_DAYS", "10"))
+SUCCESS_THRESHOLD_PCT = float(os.getenv("SUCCESS_THRESHOLD_PCT", "3.0"))
+FAILURE_THRESHOLD_PCT = float(os.getenv("FAILURE_THRESHOLD_PCT", "-3.0"))
+
+# --- Weekly stats report ---
+WEEKLY_REPORT_DAY = os.getenv("WEEKLY_REPORT_DAY", "sun")
+WEEKLY_REPORT_HOUR = int(os.getenv("WEEKLY_REPORT_HOUR", "10"))
+
+# --- Rate limiting ---
+CMD_COOLDOWN_SEC = int(os.getenv("CMD_COOLDOWN_SEC", "300"))
+
 # --- Scoring weights ---
 WEIGHT_TECHNICAL = 0.40
 WEIGHT_FUNDAMENTAL = 0.30
