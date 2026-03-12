@@ -156,6 +156,26 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(context, chat_id, format_ai_analysis(llm))
 
 
+async def _run_analysis_background(bot, chat_id):
+    """Run full analysis in background and send results when done."""
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, run_full_analysis)
+
+        if not result or not result.get("stocks"):
+            await _safe_send(bot, chat_id, "⚠️ *Акции не найдены*\n\nПо текущим критериям нет подходящих кандидатов.")
+            return
+
+        await _safe_send(bot, chat_id, format_market_overview(result["market_context"]))
+        await asyncio.sleep(1)
+        await _safe_send(bot, chat_id, format_stocks_table(result["stocks"]))
+        await asyncio.sleep(1)
+        await _safe_send(bot, chat_id, format_ai_analysis(result["llm_response"]))
+
+    except Exception as e:
+        logger.error(f"Run command failed: {e}", exc_info=True)
+        await _safe_send(bot, chat_id, "❌ *Ошибка анализа.* Повторите позже.")
+
+
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         return
@@ -170,29 +190,14 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _last_run_time[str(chat_id)] = now
 
-    await _safe_send(context, chat_id, "🔄 *Запуск полного анализа S&P 500*\n\nЭто займёт 5-10 минут...")
-
     if not run_full_analysis:
         await _safe_send(context, chat_id, "Analysis not configured")
         return
 
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(None, run_full_analysis)
+    await _safe_send(context, chat_id, "🔄 *Запуск полного анализа S&P 500*\n\nЭто займёт 5-10 минут...\nБот продолжает работать — можете пользоваться другими командами.")
 
-        if not result or not result.get("stocks"):
-            await _safe_send(context, chat_id, "⚠️ *Акции не найдены*\n\nПо текущим критериям нет подходящих кандидатов.")
-            return
-
-        # Send 3 messages: market overview, stocks table, AI analysis
-        await _safe_send(context, chat_id, format_market_overview(result["market_context"]))
-        await asyncio.sleep(1)
-        await _safe_send(context, chat_id, format_stocks_table(result["stocks"]))
-        await asyncio.sleep(1)
-        await _safe_send(context, chat_id, format_ai_analysis(result["llm_response"]))
-
-    except Exception as e:
-        logger.error(f"Run command failed: {e}", exc_info=True)
-        await _safe_send(context, chat_id, "❌ *Ошибка анализа.* Повторите позже.")
+    # Fire-and-forget: analysis runs in background, bot stays responsive
+    asyncio.create_task(_run_analysis_background(context.bot, chat_id))
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -524,9 +529,8 @@ async def scheduled_report_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_scheduled_report(bot):
-    """Send automated report to all subscribed users."""
+    """Send automated report to all subscribed users (non-blocking)."""
     subscribers = get_subscribed_users()
-    # Fallback to TELEGRAM_CHAT_ID if no subscribers yet
     if not subscribers and TELEGRAM_CHAT_ID:
         subscribers = [TELEGRAM_CHAT_ID]
     if not subscribers:
@@ -538,38 +542,38 @@ async def send_scheduled_report(bot):
             await _safe_send(bot, cid, "Analysis not configured")
         return
 
-    # Notify subscribers that analysis started
     for cid in subscribers:
         await _safe_send(bot, cid, "🔄 *Автоматический анализ S&P 500...*")
 
-    try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, run_full_analysis)
+    async def _do_report():
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(None, run_full_analysis)
 
-        if not result or not result.get("stocks"):
+            if not result or not result.get("stocks"):
+                for cid in subscribers:
+                    await _safe_send(bot, cid, "⚠️ По текущим критериям нет подходящих кандидатов.")
+                return
+
+            msg_market = format_market_overview(result["market_context"])
+            msg_stocks = format_stocks_table(result["stocks"])
+            msg_ai = format_ai_analysis(result["llm_response"])
+
             for cid in subscribers:
-                await _safe_send(bot, cid, "⚠️ По текущим критериям нет подходящих кандидатов.")
-            return
+                try:
+                    await _safe_send(bot, cid, msg_market)
+                    await asyncio.sleep(0.5)
+                    await _safe_send(bot, cid, msg_stocks)
+                    await asyncio.sleep(0.5)
+                    await _safe_send(bot, cid, msg_ai)
+                except Exception as e:
+                    logger.warning(f"Failed to send report to {cid}: {e}")
 
-        # Pre-format messages once, send to all
-        msg_market = format_market_overview(result["market_context"])
-        msg_stocks = format_stocks_table(result["stocks"])
-        msg_ai = format_ai_analysis(result["llm_response"])
+        except Exception as e:
+            logger.error(f"Scheduled report failed: {e}", exc_info=True)
+            for cid in subscribers:
+                await _safe_send(bot, cid, "❌ *Ошибка авто-отчёта.* Следующая попытка по расписанию.")
 
-        for cid in subscribers:
-            try:
-                await _safe_send(bot, cid, msg_market)
-                await asyncio.sleep(0.5)
-                await _safe_send(bot, cid, msg_stocks)
-                await asyncio.sleep(0.5)
-                await _safe_send(bot, cid, msg_ai)
-            except Exception as e:
-                logger.warning(f"Failed to send report to {cid}: {e}")
-
-    except Exception as e:
-        logger.error(f"Scheduled report failed: {e}", exc_info=True)
-        for cid in subscribers:
-            await _safe_send(bot, cid, "❌ *Ошибка авто-отчёта.* Следующая попытка по расписанию.")
+    asyncio.create_task(_do_report())
 
 
 async def check_results_job(context: ContextTypes.DEFAULT_TYPE):

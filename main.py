@@ -347,8 +347,8 @@ async def main():
     else:
         logger.info("Watchlist alerts: DISABLED")
 
-    # Start polling
-    await app.updater.start_polling()
+    # Start polling (explicitly request all update types to override stale Telegram state)
+    await app.updater.start_polling(allowed_updates=[])
     logger.info("Bot is running. Press Ctrl+C to stop.")
 
     # Keep running
