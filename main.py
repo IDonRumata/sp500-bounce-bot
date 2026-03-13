@@ -242,14 +242,15 @@ def run_single_analysis(ticker: str) -> dict | None:
 
 
 def _parse_schedule_days(days_str: str) -> tuple[int, ...]:
-    """Convert 'mon,wed,fri' → (0, 2, 4) for job_queue.run_daily."""
-    day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+    """Convert 'mon,wed,fri' → (1, 3, 5) for job_queue.run_daily.
+    python-telegram-bot uses 0=Sunday, 1=Monday, ..., 6=Saturday."""
+    day_map = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
     days = []
     for d in days_str.split(","):
         d = d.strip().lower()
         if d in day_map:
             days.append(day_map[d])
-    return tuple(sorted(days)) if days else (0, 2, 4)
+    return tuple(sorted(days)) if days else (1, 3, 5)
 
 
 async def main():
@@ -311,7 +312,7 @@ async def main():
         name="sp500_auto_report",
     )
 
-    day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+    day_names = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
     schedule_str = ",".join(day_names.get(d, "?") for d in schedule_days)
     logger.info(f"Scheduler: {schedule_str} at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC")
 
@@ -319,7 +320,7 @@ async def main():
     app.job_queue.run_daily(
         check_results_job,
         time=dtime(hour=18, minute=0, second=0),
-        days=(0, 1, 2, 3, 4),
+        days=(1, 2, 3, 4, 5),
         name="check_results",
     )
     logger.info("Result checker: Mon-Fri at 18:00 UTC")
