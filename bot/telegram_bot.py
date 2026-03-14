@@ -1,7 +1,7 @@
 import re
 import asyncio
 from datetime import datetime
-from telegram import Update, BotCommand, MenuButtonCommands
+from telegram import Update, BotCommand, MenuButtonCommands, Bot as TgBot
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 
@@ -77,8 +77,11 @@ async def _safe_send(context_or_bot, chat_id: str, text: str, parse_mode=ParseMo
     """Send message, splitting if > 4096 chars."""
     max_len = 4000  # leave margin
 
-    # Try to get bot from context or use directly
-    bot = getattr(context_or_bot, 'bot', context_or_bot)
+    # Extract Bot object: context.bot works, but Bot.bot returns User — avoid that
+    if isinstance(context_or_bot, TgBot):
+        bot = context_or_bot
+    else:
+        bot = context_or_bot.bot
 
     if len(text) <= max_len:
         try:
