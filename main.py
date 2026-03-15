@@ -56,6 +56,15 @@ def run_full_analysis() -> dict | None:
     regime = market_ctx.get("regime", "neutral")
     logger.info(f"Market regime: {regime}")
 
+    # Skip weak/panic regimes — backtest shows WR ~50% with negative avg returns
+    if regime in ("weak", "panic"):
+        logger.warning(f"Skipping analysis: market regime '{regime}' has poor bounce statistics")
+        return {
+            "market_context": market_ctx,
+            "stocks": [],
+            "llm_response": f"⚠️ Рынок в режиме *{regime.upper()}* — сигналы на отскок ненадёжны (WR ~50%, avg return отрицательный). Анализ пропущен.",
+        }
+
     # Step 2: Get S&P 500 list and pre-filter
     logger.info("Step 2: Fetching S&P 500 list and pre-filtering...")
     tickers = fetch_sp500_tickers()

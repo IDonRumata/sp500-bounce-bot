@@ -146,11 +146,13 @@ def _technical_score(t: dict) -> float:
             score += 5  # near key Fib level
 
     # --- Drawdown depth bonus ---
+    # Sweet spot is -20..-30% (WR 58%, avg +0.91%)
+    # Deeper than -30% often means fundamental problems (WR 50.8%)
     dd = t.get("drawdown_pct", 0)
     if dd < -30:
-        score += 12  # deep capitulation
+        score += 3  # too deep — often fundamental, not technical
     elif dd < -20:
-        score += 8
+        score += 8  # sweet spot for bounce
     elif dd < -15:
         score += 5
     elif dd < -10:

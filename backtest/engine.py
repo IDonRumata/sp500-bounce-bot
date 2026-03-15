@@ -205,6 +205,10 @@ def _analyze_date(test_date, all_data, spy_data, vix_data,
     regime = market_ctx.get("regime", "neutral")
     multiplier = REGIME_MULTIPLIER.get(regime, 0.95)
 
+    # Skip weak/panic regimes — data shows WR ~50% with negative avg returns
+    if regime in ("weak", "panic"):
+        return []
+
     signals = []
 
     for sym in symbols:
