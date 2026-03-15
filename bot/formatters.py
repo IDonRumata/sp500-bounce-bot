@@ -458,6 +458,30 @@ def format_backtest(result: dict) -> str:
             r_emoji = {"bullish": "🟢", "neutral": "🟡", "weak": "🟠", "bearish": "🔴", "panic": "🔴🔴"}.get(regime, "❓")
             msg += f"  {r_emoji} {regime}: WR *{data['win_rate']}%* | avg *{data['avg_return']:+.2f}%* ({data['count']})\n"
 
+    # Profit factor
+    pf = stats.get("profit_factor")
+    if pf is not None:
+        pf_emoji = "🟢" if pf >= 1.5 else ("🟡" if pf >= 1.0 else "🔴")
+        msg += f"\n{pf_emoji} Profit factor: *{pf}*\n"
+
+    # By score tier
+    by_score = stats.get("by_score_tier", {})
+    if by_score:
+        msg += "\n*По уровню score (10д):*\n"
+        for tier in ["70+", "65-70", "60-65", "55-60", "<55"]:
+            data = by_score.get(tier)
+            if data:
+                msg += f"  {tier}: WR *{data['win_rate']}%* | avg *{data['avg_return']:+.2f}%* ({data['count']})\n"
+
+    # By drawdown depth
+    by_dd = stats.get("by_drawdown", {})
+    if by_dd:
+        msg += "\n*По глубине просадки (10д):*\n"
+        for tier in ["<-30%", "-20..-30%", "-15..-20%", "-10..-15%"]:
+            data = by_dd.get(tier)
+            if data:
+                msg += f"  {tier}: WR *{data['win_rate']}%* | avg *{data['avg_return']:+.2f}%* ({data['count']})\n"
+
     # Top signals table (last 10)
     signals = result.get("signals", [])
     if signals:
@@ -466,12 +490,12 @@ def format_backtest(result: dict) -> str:
             ret10 = s.get("return_10d")
             if ret10 is not None:
                 ret_emoji = "✅" if ret10 > 0 else "❌"
-                msg += f"  {ret_emoji} {s['date']} *{s['symbol']}* sc:{s['composite_score']} → *{ret10:+.1f}%*\n"
+                msg += f"  {ret_emoji} {s['date']} *{s['symbol']}* sc:{s['composite_score']} dd:{s.get('drawdown', '?')}% → *{ret10:+.1f}%*\n"
             else:
                 msg += f"  ⏳ {s['date']} *{s['symbol']}* sc:{s['composite_score']}\n"
 
-    msg += "\n_Тех. анализ честный (без знания будущего)._\n"
-    msg += "_Фунд/сентимент = нейтральный (50). LLM пропущен._"
+    msg += "\n_Веса бэктеста: Tech 70% + Market 30%._\n"
+    msg += "_Фунд/сентимент не используются (нет ист. данных)._"
     return msg
 
 

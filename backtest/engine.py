@@ -254,12 +254,13 @@ def _analyze_date(test_date, all_data, spy_data, vix_data,
             sent_score = 50.0
             market_score = _market_score(market_ctx, sym)
 
-            # Composite (same weights as production)
+            # Composite — backtest-adapted weights
+            # Fund/sent are always 50 (neutral), so use tech-heavy weights
+            BT_WEIGHT_TECH = 0.70
+            BT_WEIGHT_MARKET = 0.30
             composite = (
-                tech_score * WEIGHT_TECHNICAL +
-                fund_score * WEIGHT_FUNDAMENTAL +
-                sent_score * WEIGHT_SENTIMENT +
-                market_score * WEIGHT_MARKET
+                tech_score * BT_WEIGHT_TECH +
+                market_score * BT_WEIGHT_MARKET
             )
             composite = max(0, min(100, composite))
 
@@ -456,5 +457,56 @@ def _calculate_stats(signals: list[dict]) -> dict:
             "win_rate": round(len([x for x in rets if x > 0]) / len(rets) * 100, 1)}
         for r, rets in regimes.items() if rets
     }
+
+    # By score tier (10d returns)
+    score_tiers = {"70+": [], "65-70": [], "60-65": [], "55-60": [], "<55": []}
+    for s in signals:
+        sc = s.get("composite_score", 0)
+        ret = s.get("return_10d")
+        if ret is None:
+            continue
+        if sc >= 70:
+            score_tiers["70+"].append(ret)
+        elif sc >= 65:
+            score_tiers["65-70"].append(ret)
+        elif sc >= 60:
+            score_tiers["60-65"].append(ret)
+        elif sc >= 55:
+            score_tiers["55-60"].append(ret)
+        else:
+            score_tiers["<55"].append(ret)
+    stats["by_score_tier"] = {
+        tier: {"count": len(rets), "avg_return": round(sum(rets) / len(rets), 2),
+               "win_rate": round(len([x for x in rets if x > 0]) / len(rets) * 100, 1)}
+        for tier, rets in score_tiers.items() if rets
+    }
+
+    # By drawdown depth (10d returns)
+    dd_tiers = {"<-30%": [], "-20..-30%": [], "-15..-20%": [], "-10..-15%": []}
+    for s in signals:
+        dd = s.get("drawdown", 0)
+        ret = s.get("return_10d")
+        if ret is None:
+            continue
+        if dd < -30:
+            dd_tiers["<-30%"].append(ret)
+        elif dd < -20:
+            dd_tiers["-20..-30%"].append(ret)
+        elif dd < -15:
+            dd_tiers["-15..-20%"].append(ret)
+        else:
+            dd_tiers["-10..-15%"].append(ret)
+    stats["by_drawdown"] = {
+        tier: {"count": len(rets), "avg_return": round(sum(rets) / len(rets), 2),
+               "win_rate": round(len([x for x in rets if x > 0]) / len(rets) * 100, 1)}
+        for tier, rets in dd_tiers.items() if rets
+    }
+
+    # Profit factor (sum of wins / abs sum of losses)
+    returns_10d = [s.get("return_10d") for s in signals if s.get("return_10d") is not None]
+    if returns_10d:
+        gross_profit = sum(r for r in returns_10d if r > 0)
+        gross_loss = abs(sum(r for r in returns_10d if r < 0))
+        stats["profit_factor"] = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
 
     return stats

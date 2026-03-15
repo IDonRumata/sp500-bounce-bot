@@ -145,6 +145,17 @@ def _technical_score(t: dict) -> float:
         if abs(fib_dist) < 3:
             score += 5  # near key Fib level
 
+    # --- Drawdown depth bonus ---
+    dd = t.get("drawdown_pct", 0)
+    if dd < -30:
+        score += 12  # deep capitulation
+    elif dd < -20:
+        score += 8
+    elif dd < -15:
+        score += 5
+    elif dd < -10:
+        score += 2
+
     # --- Extreme volatility penalty ---
     atr_pct = t.get("atr_pct")
     if atr_pct is not None and atr_pct > 8:
