@@ -381,6 +381,8 @@ def format_help() -> str:
 `/sell TICKER` — Продать позицию
 `/portfolio` — Открытые позиции с P&L
 `/portfolio history` — История закрытых сделок
+`/backtest 365` — Бэктест за N дней
+`/backtest 2024-01-15` — Бэктест на дату
 `/subscribe` — Подписаться на авто-отчёты
 `/unsubscribe` — Отписаться от авто-отчётов
 `/settings` — Мои настройки
@@ -397,6 +399,80 @@ def format_help() -> str:
 • Календарь отчётностей
 
 ⚠️ _Не является инвестиционной рекомендацией_"""
+
+
+def format_backtest(result: dict) -> str:
+    """Format backtest results for Telegram."""
+    if result.get("error"):
+        return f"❌ *Ошибка бэктеста:* {result['error']}"
+
+    total = result.get("total_signals", 0)
+    if total == 0:
+        return "📉 *Бэктест*\n\nНе найдено сигналов за указанный период."
+
+    stats = result.get("stats", {})
+    date_info = result.get("date", "")
+    days_back = result.get("days_back", "")
+
+    if date_info:
+        msg = f"🧪 *Бэктест на {date_info}*\n\n"
+    else:
+        msg = f"🧪 *Бэктест за {days_back} дней*\n"
+        msg += f"📊 Тестовых дат: {result.get('test_dates', '?')}\n\n"
+
+    msg += f"Всего сигналов: *{total}*\n\n"
+
+    # Results by window
+    msg += "*Результаты:*\n"
+    for w in [5, 10, 20]:
+        wr = stats.get(f"win_rate_{w}d")
+        avg = stats.get(f"avg_return_{w}d")
+        med = stats.get(f"median_return_{w}d")
+        cnt = stats.get(f"count_{w}d", 0)
+        if wr is not None:
+            wr_emoji = "🟢" if wr >= 55 else ("🟡" if wr >= 45 else "🔴")
+            avg_emoji = "📈" if avg >= 0 else "📉"
+            msg += (
+                f"\n  *{w} дней:*\n"
+                f"    {wr_emoji} Win rate: *{wr}%* ({cnt} сигналов)\n"
+                f"    {avg_emoji} Средний: *{avg:+.2f}%* | Медиана: *{med:+.2f}%*\n"
+                f"    Лучший: {stats.get(f'best_{w}d', '?')}% | Худший: {stats.get(f'worst_{w}d', '?')}%\n"
+            )
+
+    # Max gain/loss
+    avg_mg = stats.get("avg_max_gain")
+    avg_ml = stats.get("avg_max_loss")
+    if avg_mg is not None and avg_ml is not None:
+        msg += f"\n📊 Ср. макс. рост: *{avg_mg:+.2f}%* | Ср. макс. падение: *{avg_ml:+.2f}%*\n"
+
+    # Score stats
+    avg_sc = stats.get("avg_score")
+    if avg_sc is not None:
+        msg += f"\n🎯 Ср. score: {avg_sc} (мин: {stats.get('min_score', '?')}, макс: {stats.get('max_score', '?')})\n"
+
+    # By regime
+    by_regime = stats.get("by_regime", {})
+    if by_regime:
+        msg += "\n*По режиму рынка (10д):*\n"
+        for regime, data in sorted(by_regime.items()):
+            r_emoji = {"bullish": "🟢", "neutral": "🟡", "weak": "🟠", "bearish": "🔴", "panic": "🔴🔴"}.get(regime, "❓")
+            msg += f"  {r_emoji} {regime}: WR *{data['win_rate']}%* | avg *{data['avg_return']:+.2f}%* ({data['count']})\n"
+
+    # Top signals table (last 10)
+    signals = result.get("signals", [])
+    if signals:
+        msg += "\n*Последние сигналы:*\n"
+        for s in signals[-10:]:
+            ret10 = s.get("return_10d")
+            if ret10 is not None:
+                ret_emoji = "✅" if ret10 > 0 else "❌"
+                msg += f"  {ret_emoji} {s['date']} *{s['symbol']}* sc:{s['composite_score']} → *{ret10:+.1f}%*\n"
+            else:
+                msg += f"  ⏳ {s['date']} *{s['symbol']}* sc:{s['composite_score']}\n"
+
+    msg += "\n_Тех. анализ честный (без знания будущего)._\n"
+    msg += "_Фунд/сентимент = нейтральный (50). LLM пропущен._"
+    return msg
 
 
 def format_status(last_run: str | None, next_run: str | None, uptime: str) -> str:

@@ -14,6 +14,7 @@ from bot.formatters import (
     format_single_stock, format_watchlist, format_help, format_status,
     format_stats, format_check_results, format_settings, format_admin_users,
     format_alerts, format_portfolio, format_portfolio_history,
+    format_backtest,
 )
 from storage.database import (
     get_last_report, get_watchlist,
@@ -523,6 +524,79 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(context, chat_id, "❌ Ошибка загрузки портфеля.")
 
 
+# ---- Backtest Command ----
+
+async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /backtest [days|YYYY-MM-DD] — run historical backtest."""
+    if not _is_authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    args = context.args
+
+    if not args:
+        await _safe_send(context, chat_id,
+            "*Использование:*\n"
+            "`/backtest 365` — бэктест за последние 365 дней\n"
+            "`/backtest 2024-01-15` — бэктест на конкретную дату\n\n"
+            "_Бэктест занимает 2-5 минут._"
+        )
+        return
+
+    arg = args[0]
+
+    # Determine if it's a date or number of days
+    is_date = "-" in arg and len(arg) == 10
+    if is_date:
+        try:
+            datetime.strptime(arg, "%Y-%m-%d")
+        except ValueError:
+            await _safe_send(context, chat_id, "❌ Формат даты: `YYYY-MM-DD` (напр. `2024-01-15`)")
+            return
+        await _safe_send(context, chat_id,
+            f"🧪 *Запуск бэктеста на {arg}...*\n\n"
+            "Это займёт 2-5 минут.\n"
+            "Бот продолжает работать — можете пользоваться другими командами."
+        )
+        asyncio.create_task(_run_backtest_background(context.bot, chat_id, date=arg))
+    else:
+        try:
+            days = int(arg)
+            if days < 30 or days > 3650:
+                await _safe_send(context, chat_id, "❌ Укажите от 30 до 3650 дней")
+                return
+        except ValueError:
+            await _safe_send(context, chat_id, "❌ Укажите число дней или дату: `/backtest 365` или `/backtest 2024-01-15`")
+            return
+        await _safe_send(context, chat_id,
+            f"🧪 *Запуск бэктеста за {days} дней...*\n\n"
+            "Это займёт 2-5 минут.\n"
+            "Бот продолжает работать — можете пользоваться другими командами."
+        )
+        asyncio.create_task(_run_backtest_background(context.bot, chat_id, days=days))
+
+
+async def _run_backtest_background(bot, chat_id, days=None, date=None):
+    """Run backtest in background and send results."""
+    from backtest.engine import run_backtest, run_backtest_date
+
+    try:
+        if date:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, run_backtest_date, date,
+            )
+        else:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, run_backtest, days,
+            )
+
+        msg = format_backtest(result)
+        await _safe_send(bot, chat_id, msg)
+
+    except Exception as e:
+        logger.error(f"Backtest failed: {e}", exc_info=True)
+        await _safe_send(bot, chat_id, "❌ *Ошибка бэктеста.* Повторите позже.")
+
+
 # ---- Scheduled Report ----
 
 async def scheduled_report_job(context: ContextTypes.DEFAULT_TYPE):
@@ -663,6 +737,7 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("take", cmd_take))
     app.add_handler(CommandHandler("sell", cmd_sell))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
+    app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("settings", cmd_settings))
