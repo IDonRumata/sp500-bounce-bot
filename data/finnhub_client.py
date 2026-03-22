@@ -11,11 +11,10 @@ def _get(endpoint: str, params: dict = None) -> dict | list | None:
     params = params or {}
     params["token"] = FINNHUB_API_KEY
     try:
-        resp = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=15)
+        resp = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=5)
         if resp.status_code == 429:
-            logger.warning("Finnhub rate limit hit, waiting 60s...")
-            time.sleep(60)
-            resp = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=15)
+            logger.warning(f"Finnhub rate limit hit on {endpoint}, skipping")
+            return None
         resp.raise_for_status()
         return resp.json()
     except Exception as e:

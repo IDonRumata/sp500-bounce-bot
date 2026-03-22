@@ -4,7 +4,9 @@ Entry point: Telegram bot + built-in job_queue scheduler
 """
 import asyncio
 import json
-from datetime import datetime, time as dtime
+import signal
+from datetime import datetime, time as dtime, timezone
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from config import (
     SCHEDULE_DAYS, SCHEDULE_HOUR, SCHEDULE_MINUTE,
@@ -83,57 +85,70 @@ def run_full_analysis() -> dict | None:
     logger.info(f"Step 3: Deep analysis for {len(candidates)} candidates...")
     analyzed_stocks = []
 
+    STOCK_TIMEOUT = 30  # max seconds per stock
+
+    def _analyze_single(cand, market_ctx, regime):
+        """Analyze one stock (runs in thread with timeout)."""
+        symbol = cand["symbol"]
+        df = cand.get("df")
+        if df is None or df.empty:
+            return None
+        tech = full_technical_analysis(df, symbol)
+        if tech.get("error"):
+            return None
+
+        fund_raw = fetch_fundamentals(symbol)
+        fund = analyze_fundamentals(fund_raw)
+
+        sent = analyze_sentiment(symbol)
+
+        scores = compute_composite_score(tech, fund, sent, market_ctx)
+
+        multiplier = REGIME_MULTIPLIER.get(regime, 0.95)
+        if multiplier < 1.0:
+            original = scores["composite_score"]
+            scores["composite_score"] = round(original * multiplier, 1)
+            cs = scores["composite_score"]
+            if cs >= 75:
+                scores["bounce_probability"] = "high"
+            elif cs >= 60:
+                scores["bounce_probability"] = "medium_high"
+            elif cs >= 45:
+                scores["bounce_probability"] = "medium"
+            elif cs >= 30:
+                scores["bounce_probability"] = "low"
+            else:
+                scores["bounce_probability"] = "very_low"
+
+        return {
+            "technical": tech,
+            "fundamental": fund,
+            "sentiment": sent,
+            "scores": scores,
+        }
+
+    skipped = 0
     for i, cand in enumerate(candidates):
         symbol = cand["symbol"]
         logger.info(f"  Analyzing {i+1}/{len(candidates)}: {symbol}")
 
         try:
-            # Technical analysis (already have price data)
-            df = cand.get("df")
-            if df is None or df.empty:
-                continue
-            tech = full_technical_analysis(df, symbol)
-            if tech.get("error"):
-                continue
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_analyze_single, cand, market_ctx, regime)
+                result = future.result(timeout=STOCK_TIMEOUT)
+                if result:
+                    analyzed_stocks.append(result)
 
-            # Fundamental analysis
-            fund_raw = fetch_fundamentals(symbol)
-            fund = analyze_fundamentals(fund_raw)
-
-            # Sentiment analysis (Finnhub — rate limited)
-            sent = analyze_sentiment(symbol)
-
-            # Composite score
-            scores = compute_composite_score(tech, fund, sent, market_ctx)
-
-            # Apply market regime multiplier
-            multiplier = REGIME_MULTIPLIER.get(regime, 0.95)
-            if multiplier < 1.0:
-                original = scores["composite_score"]
-                scores["composite_score"] = round(original * multiplier, 1)
-                # Recalculate probability label
-                cs = scores["composite_score"]
-                if cs >= 75:
-                    scores["bounce_probability"] = "high"
-                elif cs >= 60:
-                    scores["bounce_probability"] = "medium_high"
-                elif cs >= 45:
-                    scores["bounce_probability"] = "medium"
-                elif cs >= 30:
-                    scores["bounce_probability"] = "low"
-                else:
-                    scores["bounce_probability"] = "very_low"
-
-            analyzed_stocks.append({
-                "technical": tech,
-                "fundamental": fund,
-                "sentiment": sent,
-                "scores": scores,
-            })
-
+        except FuturesTimeout:
+            logger.warning(f"  TIMEOUT analyzing {symbol} (>{STOCK_TIMEOUT}s), skipping")
+            skipped += 1
+            continue
         except Exception as e:
             logger.error(f"  Error analyzing {symbol}: {e}")
             continue
+
+    if skipped:
+        logger.info(f"  Skipped {skipped} stocks due to timeout")
 
     if not analyzed_stocks:
         logger.warning("No stocks survived deep analysis")
@@ -251,15 +266,15 @@ def run_single_analysis(ticker: str) -> dict | None:
 
 
 def _parse_schedule_days(days_str: str) -> tuple[int, ...]:
-    """Convert 'mon,wed,fri' → (1, 3, 5) for job_queue.run_daily.
-    python-telegram-bot uses 0=Sunday, 1=Monday, ..., 6=Saturday."""
-    day_map = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+    """Convert 'mon,wed,fri' → (0, 2, 4) for job_queue.run_daily.
+    python-telegram-bot uses 0=Monday, ..., 6=Sunday."""
+    day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
     days = []
     for d in days_str.split(","):
         d = d.strip().lower()
         if d in day_map:
             days.append(day_map[d])
-    return tuple(sorted(days)) if days else (1, 3, 5)
+    return tuple(sorted(days)) if days else (0, 2, 4)
 
 
 async def main():
@@ -313,7 +328,7 @@ async def main():
 
     # Setup scheduled reports using telegram's built-in job_queue
     schedule_days = _parse_schedule_days(SCHEDULE_DAYS)
-    schedule_time = dtime(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, second=0)
+    schedule_time = dtime(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, second=0, tzinfo=timezone.utc)
 
     app.job_queue.run_daily(
         scheduled_report_job,
@@ -322,15 +337,15 @@ async def main():
         name="sp500_auto_report",
     )
 
-    day_names = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
+    day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
     schedule_str = ",".join(day_names.get(d, "?") for d in schedule_days)
     logger.info(f"Scheduler: {schedule_str} at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} UTC")
 
     # Setup daily result checking (Mon-Fri 18:00 UTC, after market close)
     app.job_queue.run_daily(
         check_results_job,
-        time=dtime(hour=18, minute=0, second=0),
-        days=(1, 2, 3, 4, 5),
+        time=dtime(hour=18, minute=0, second=0, tzinfo=timezone.utc),
+        days=(0, 1, 2, 3, 4),
         name="check_results",
     )
     logger.info("Result checker: Mon-Fri at 18:00 UTC")
@@ -339,7 +354,7 @@ async def main():
     weekly_days = _parse_schedule_days(WEEKLY_REPORT_DAY)
     app.job_queue.run_daily(
         weekly_stats_job,
-        time=dtime(hour=WEEKLY_REPORT_HOUR, minute=0, second=0),
+        time=dtime(hour=WEEKLY_REPORT_HOUR, minute=0, second=0, tzinfo=timezone.utc),
         days=weekly_days,
         name="weekly_stats",
     )
