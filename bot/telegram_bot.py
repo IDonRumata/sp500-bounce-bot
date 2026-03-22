@@ -1,6 +1,7 @@
 import re
 import asyncio
 from datetime import datetime
+import telegram
 from telegram import Update, BotCommand, MenuButtonCommands, Bot as TgBot
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
@@ -32,6 +33,9 @@ bot_start_time = datetime.now()
 
 # Rate limiting for /run
 _last_run_time: dict[str, datetime] = {}
+
+# Strong references to background tasks to prevent garbage collection
+_bg_tasks = set()
 
 # Ticker validation pattern (1-5 uppercase letters, optionally with dash)
 _TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
@@ -87,10 +91,21 @@ async def _safe_send(context_or_bot, chat_id: str, text: str, parse_mode=ParseMo
     if len(text) <= max_len:
         try:
             await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, disable_web_page_preview=True)
+        except telegram.error.Forbidden as e:
+            # User blocked the bot — log and skip (don't retry)
+            logger.warning(f"User {chat_id} blocked the bot: {e}")
+            return
         except Exception as e:
             # Fallback: send without Markdown if formatting fails
             logger.warning(f"Markdown send failed, retrying plain: {e}")
-            await bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
+            try:
+                await bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
+            except telegram.error.Forbidden:
+                logger.warning(f"User {chat_id} blocked the bot (plain fallback)")
+                return
+            except Exception as e2:
+                logger.error(f"Failed to send message to {chat_id}: {e2}")
+                return
         return
 
     # Split by double newlines
@@ -101,8 +116,17 @@ async def _safe_send(context_or_bot, chat_id: str, text: str, parse_mode=ParseMo
             if chunk:
                 try:
                     await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=parse_mode, disable_web_page_preview=True)
+                except telegram.error.Forbidden:
+                    logger.warning(f"User {chat_id} blocked the bot (split send)")
+                    return
                 except Exception:
-                    await bot.send_message(chat_id=chat_id, text=chunk, disable_web_page_preview=True)
+                    try:
+                        await bot.send_message(chat_id=chat_id, text=chunk, disable_web_page_preview=True)
+                    except telegram.error.Forbidden:
+                        logger.warning(f"User {chat_id} blocked the bot (split plain)")
+                        return
+                    except Exception as e:
+                        logger.error(f"Failed to send chunk to {chat_id}: {e}")
                 await asyncio.sleep(0.5)
             chunk = part
         else:
@@ -110,8 +134,17 @@ async def _safe_send(context_or_bot, chat_id: str, text: str, parse_mode=ParseMo
     if chunk:
         try:
             await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=parse_mode, disable_web_page_preview=True)
+        except telegram.error.Forbidden:
+            logger.warning(f"User {chat_id} blocked the bot (final chunk)")
+            return
         except Exception:
-            await bot.send_message(chat_id=chat_id, text=chunk, disable_web_page_preview=True)
+            try:
+                await bot.send_message(chat_id=chat_id, text=chunk, disable_web_page_preview=True)
+            except telegram.error.Forbidden:
+                logger.warning(f"User {chat_id} blocked the bot (final plain)")
+                return
+            except Exception as e:
+                logger.error(f"Failed to send final chunk to {chat_id}: {e}")
 
 
 # ---- Command Handlers ----
@@ -201,7 +234,9 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _safe_send(context, chat_id, "🔄 *Запуск полного анализа S&P 500*\n\nЭто займёт 5-10 минут...\nБот продолжает работать — можете пользоваться другими командами.")
 
     # Fire-and-forget: analysis runs in background, bot stays responsive
-    asyncio.create_task(_run_analysis_background(context.bot, chat_id))
+    task = asyncio.create_task(_run_analysis_background(context.bot, chat_id))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -557,7 +592,9 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Это займёт 2-5 минут.\n"
             "Бот продолжает работать — можете пользоваться другими командами."
         )
-        asyncio.create_task(_run_backtest_background(context.bot, chat_id, date=arg))
+        task = asyncio.create_task(_run_backtest_background(context.bot, chat_id, date=arg))
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
     else:
         try:
             days = int(arg)
@@ -572,7 +609,9 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Это займёт 2-5 минут.\n"
             "Бот продолжает работать — можете пользоваться другими командами."
         )
-        asyncio.create_task(_run_backtest_background(context.bot, chat_id, days=days))
+        task = asyncio.create_task(_run_backtest_background(context.bot, chat_id, days=days))
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
 
 
 async def _run_backtest_background(bot, chat_id, days=None, date=None):
@@ -650,7 +689,9 @@ async def send_scheduled_report(bot):
             for cid in subscribers:
                 await _safe_send(bot, cid, "❌ *Ошибка авто-отчёта.* Следующая попытка по расписанию.")
 
-    asyncio.create_task(_do_report())
+    task = asyncio.create_task(_do_report())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 async def check_results_job(context: ContextTypes.DEFAULT_TYPE):
