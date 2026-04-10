@@ -16,7 +16,7 @@ from bot.formatters import (
     format_stats, format_check_results, format_settings, format_admin_users,
     format_alerts, format_portfolio, format_portfolio_history,
     format_backtest, format_entry_signals, format_exit_signals,
-    format_performance,
+    format_performance, format_snapshot_digest,
 )
 from storage.database import (
     get_last_report, get_watchlist,
@@ -25,7 +25,7 @@ from storage.database import (
     register_user, get_user, get_all_active_users,
     get_subscribed_users, update_user_setting,
 )
-from evaluation.check_results import check_pending_results, check_pending_30d_results
+from evaluation.check_results import check_pending_results, check_pending_30d_results, snapshot_all_recommendations
 
 # Will be set by main.py
 run_full_analysis = None
@@ -758,6 +758,38 @@ async def check_results_job(context: ContextTypes.DEFAULT_TYPE):
             logger.info("No pending 30d results to report")
     except Exception as e:
         logger.error(f"Check results (30d) job failed: {e}", exc_info=True)
+
+
+async def dynamic_snapshot_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback: Tue/Thu/Sat dynamic tracking digest for all active recommendations."""
+    logger.info("Dynamic snapshot job triggered")
+
+    subscribers = get_subscribed_users()
+    if not subscribers and TELEGRAM_CHAT_ID:
+        subscribers = [TELEGRAM_CHAT_ID]
+
+    try:
+        loop = asyncio.get_event_loop()
+        snapshot = await loop.run_in_executor(None, snapshot_all_recommendations)
+        if not snapshot:
+            logger.info("Snapshot: no data to send")
+            return
+
+        msg = format_snapshot_digest(snapshot)
+        if not msg:
+            return
+
+        for cid in subscribers:
+            try:
+                await _safe_send(context.bot, cid, msg)
+            except telegram.error.Forbidden:
+                logger.warning(f"User {cid} blocked bot (snapshot)")
+            except Exception as e:
+                logger.warning(f"Failed to send snapshot to {cid}: {e}")
+
+        logger.info(f"Snapshot digest sent to {len(subscribers)} users")
+    except Exception as e:
+        logger.error(f"Dynamic snapshot job failed: {e}", exc_info=True)
 
 
 async def weekly_stats_job(context: ContextTypes.DEFAULT_TYPE):

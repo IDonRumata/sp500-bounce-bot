@@ -340,6 +340,62 @@ def format_performance(stats: dict) -> str:
     return msg
 
 
+def format_snapshot_digest(snapshot: dict) -> str:
+    """
+    Format dynamic tracking digest (sent Tue/Thu/Sat).
+    Compact: header stats + top5 winners + top5 losers + age breakdown.
+    Anti-spam: no per-ticker lines for flat movers.
+    """
+    if not snapshot:
+        return ""
+
+    date = snapshot["date"]
+    total = snapshot["total"]
+    avg = snapshot["avg_return"]
+    wr = snapshot["win_rate"]
+    wins = snapshot["wins"]
+    losses = snapshot["losses"]
+    flat = snapshot["flat"]
+
+    avg_emoji = "📈" if avg >= 0 else "📉"
+    wr_emoji = "🟢" if wr >= 55 else ("🟡" if wr >= 45 else "🔴")
+
+    msg = f"📊 *Динамика рекомендаций* — {date}\n"
+    msg += f"Отслеживается: *{total}* позиций\n\n"
+    msg += f"{avg_emoji} Средний P&L: *{avg:+.2f}%*\n"
+    msg += f"{wr_emoji} В плюсе: *{wins}* | В нуле: *{flat}* | В минусе: *{losses}*\n"
+    msg += f"Win rate (>0%): *{wr}%*\n"
+
+    # Age breakdown
+    fresh_avg = snapshot.get("fresh_avg")
+    older_avg = snapshot.get("older_avg")
+    if fresh_avg is not None and snapshot["fresh_count"] > 0:
+        msg += f"\n📅 Свежие (≤14д): *{snapshot['fresh_count']}* сигналов, avg *{fresh_avg:+.2f}%*\n"
+    if older_avg is not None and snapshot["older_count"] > 0:
+        msg += f"📅 Старые (>14д): *{snapshot['older_count']}* сигналов, avg *{older_avg:+.2f}%*\n"
+
+    # Top 5 winners
+    top5 = snapshot.get("top5", [])
+    if top5:
+        msg += "\n🏆 *Топ-5 лучших:*\n"
+        for e in top5:
+            link = f"https://www.tradingview.com/chart/?symbol={e['ticker']}"
+            msg += f"  ✅ [{e['ticker']}]({link}) *{e['pnl_pct']:+.2f}%* | ${e['entry']:.0f}→${e['current']:.0f} | {e['age_days']}д\n"
+
+    # Bottom 5 losers
+    bottom5 = snapshot.get("bottom5", [])
+    # Only show if they're actual losses (not just slightly negative)
+    real_losers = [e for e in bottom5 if e["pnl_pct"] < -1.0]
+    if real_losers:
+        msg += "\n💀 *Топ-5 худших:*\n"
+        for e in real_losers:
+            link = f"https://www.tradingview.com/chart/?symbol={e['ticker']}"
+            msg += f"  ❌ [{e['ticker']}]({link}) *{e['pnl_pct']:+.2f}%* | ${e['entry']:.0f}→${e['current']:.0f} | {e['age_days']}д\n"
+
+    msg += "\n_Полная статистика: /performance_"
+    return msg
+
+
 def format_portfolio(positions: list[dict], summary: dict) -> str:
     """Format open portfolio positions with live P&L."""
     if not positions:

@@ -139,6 +139,99 @@ def check_pending_30d_results() -> list[dict]:
     return results
 
 
+def snapshot_all_recommendations() -> dict:
+    """
+    Dynamic tracking: fetch current prices for ALL active recommendations
+    (not expired, signal_date within last 60 days).
+    Returns a digest dict with aggregate stats + notable movers.
+    Called 3x/week (Tue/Thu/Sat).
+    """
+    from storage.database import get_active_recommendations_for_snapshot
+
+    recs = get_active_recommendations_for_snapshot()
+    if not recs:
+        logger.info("Snapshot: no active recommendations to track")
+        return {}
+
+    logger.info(f"Snapshot: tracking {len(recs)} active recommendations")
+
+    tickers = list({r["ticker"] for r in recs})
+    prices = _fetch_current_prices(tickers)
+
+    if not prices:
+        logger.error("Snapshot: failed to fetch prices")
+        return {}
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    enriched = []
+
+    for rec in recs:
+        ticker = rec["ticker"]
+        current_price = prices.get(ticker)
+        if current_price is None:
+            continue
+
+        entry_price = rec["price_at_signal"]
+        pnl_pct = round((current_price / entry_price - 1) * 100, 2)
+        age_days = (datetime.now() - datetime.strptime(rec["signal_date"], "%Y-%m-%d")).days
+
+        # Status label
+        if pnl_pct >= 3.0:
+            status = "win"
+        elif pnl_pct <= -3.0:
+            status = "loss"
+        else:
+            status = "flat"
+
+        enriched.append({
+            "ticker": ticker,
+            "signal_date": rec["signal_date"],
+            "entry": entry_price,
+            "current": current_price,
+            "pnl_pct": pnl_pct,
+            "status": status,
+            "age_days": age_days,
+            "score": rec["composite_score"],
+        })
+
+    if not enriched:
+        return {}
+
+    # Aggregate stats
+    returns = [e["pnl_pct"] for e in enriched]
+    wins = [r for r in returns if r > 0]
+    avg_return = round(sum(returns) / len(returns), 2)
+    win_rate = round(len(wins) / len(returns) * 100, 1)
+
+    # Sort by P&L for top/bottom
+    sorted_by_pnl = sorted(enriched, key=lambda x: x["pnl_pct"], reverse=True)
+    top5 = sorted_by_pnl[:5]
+    bottom5 = sorted_by_pnl[-5:][::-1]  # worst first
+
+    # Age buckets
+    fresh = [e for e in enriched if e["age_days"] <= 14]
+    older = [e for e in enriched if e["age_days"] > 14]
+
+    result = {
+        "date": today,
+        "total": len(enriched),
+        "avg_return": avg_return,
+        "win_rate": win_rate,
+        "wins": len([e for e in enriched if e["status"] == "win"]),
+        "losses": len([e for e in enriched if e["status"] == "loss"]),
+        "flat": len([e for e in enriched if e["status"] == "flat"]),
+        "top5": top5,
+        "bottom5": bottom5,
+        "fresh_avg": round(sum(e["pnl_pct"] for e in fresh) / len(fresh), 2) if fresh else None,
+        "older_avg": round(sum(e["pnl_pct"] for e in older) / len(older), 2) if older else None,
+        "fresh_count": len(fresh),
+        "older_count": len(older),
+    }
+
+    logger.info(f"Snapshot done: {len(enriched)} recs, avg {avg_return:+.2f}%, WR {win_rate}%")
+    return result
+
+
 def _fetch_current_prices(tickers: list[str]) -> dict[str, float]:
     """Fetch current prices for a list of tickers."""
     prices = {}

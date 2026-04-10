@@ -28,7 +28,7 @@ from bot.telegram_bot import (
     create_bot_application, set_analysis_callbacks,
     send_scheduled_report, scheduled_report_job,
     check_results_job, weekly_stats_job,
-    watchlist_alert_job,
+    watchlist_alert_job, dynamic_snapshot_job,
 )
 from config import TELEGRAM_CHAT_ID as _CHAT_ID, ALERT_ENABLED, ALERT_INTERVAL_MIN
 
@@ -361,6 +361,16 @@ async def main():
     )
     weekly_str = ",".join(day_names.get(d, "?") for d in weekly_days)
     logger.info(f"Weekly stats: {weekly_str} at {WEEKLY_REPORT_HOUR:02d}:00 UTC")
+
+    # Setup dynamic snapshot: Tue/Thu/Sat at 18:30 UTC (after US market close)
+    # python-telegram-bot days: 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat
+    app.job_queue.run_daily(
+        dynamic_snapshot_job,
+        time=dtime(hour=18, minute=30, second=0, tzinfo=timezone.utc),
+        days=(2, 4, 6),  # Tue, Thu, Sat
+        name="dynamic_snapshot",
+    )
+    logger.info("Dynamic snapshot: Tue,Thu,Sat at 18:30 UTC")
 
     # Setup watchlist alerts (repeating job)
     if ALERT_ENABLED:

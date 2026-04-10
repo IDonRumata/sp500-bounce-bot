@@ -556,6 +556,27 @@ def get_pending_recommendations() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_active_recommendations_for_snapshot(days_back: int = 60) -> list[dict]:
+    """Get all recommendations from last N days for dynamic snapshot tracking."""
+    cutoff = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT ticker, signal_date, price_at_signal, composite_score
+           FROM recommendations
+           WHERE signal_date >= ?
+           ORDER BY signal_date DESC""",
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+    # Deduplicate: keep best score per (ticker, signal_date)
+    seen = {}
+    for r in rows:
+        key = (r["ticker"], r["signal_date"])
+        if key not in seen or r["composite_score"] > seen[key]["composite_score"]:
+            seen[key] = dict(r)
+    return list(seen.values())
+
+
 def get_pending_30d_recommendations() -> list[dict]:
     """Get recommendations ready for 30-day result checking."""
     today = datetime.now().strftime("%Y-%m-%d")
