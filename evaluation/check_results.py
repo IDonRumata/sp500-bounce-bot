@@ -5,7 +5,10 @@ Run daily after market close to evaluate recommendation accuracy.
 import yfinance as yf
 from datetime import datetime, timedelta
 from config import SUCCESS_THRESHOLD_PCT, FAILURE_THRESHOLD_PCT, logger
-from storage.database import get_pending_recommendations, update_recommendation_result
+from storage.database import (
+    get_pending_recommendations, update_recommendation_result,
+    get_pending_30d_recommendations, update_recommendation_30d_result,
+)
 
 
 def check_pending_results() -> list[dict]:
@@ -74,6 +77,65 @@ def check_pending_results() -> list[dict]:
         logger.info(f"  {ticker}: {price_at_signal:.2f} → {current_price:.2f} ({result_pct:+.2f}%) = {status}")
 
     logger.info(f"Checked {len(results)}/{len(pending)} recommendations")
+    return results
+
+
+def check_pending_30d_results() -> list[dict]:
+    """
+    Check all pending 30-day recommendations whose check_date_30d has passed.
+    Returns list of checked results for reporting.
+    """
+    pending = get_pending_30d_recommendations()
+    if not pending:
+        logger.info("No pending 30d recommendations to check")
+        return []
+
+    logger.info(f"Checking {len(pending)} pending 30d recommendations...")
+    results = []
+
+    tickers = list(set(r["ticker"] for r in pending))
+    prices = _fetch_current_prices(tickers)
+
+    for rec in pending:
+        ticker = rec["ticker"]
+        price_at_signal = rec["price_at_signal"]
+        signal_date = rec["signal_date"]
+
+        current_price = prices.get(ticker)
+        if current_price is None:
+            logger.warning(f"Could not fetch price for {ticker} (30d), skipping")
+            continue
+
+        result_pct = round(((current_price - price_at_signal) / price_at_signal) * 100, 2)
+
+        if result_pct >= SUCCESS_THRESHOLD_PCT:
+            status_30d = "success_30d"
+        elif result_pct <= FAILURE_THRESHOLD_PCT:
+            status_30d = "failure_30d"
+        else:
+            status_30d = "neutral_30d"
+
+        update_recommendation_30d_result(
+            rec_id=rec["id"],
+            price_at_check=current_price,
+            result_pct=result_pct,
+            status_30d=status_30d,
+        )
+
+        results.append({
+            "ticker": ticker,
+            "price_at_signal": price_at_signal,
+            "price_at_check": current_price,
+            "result_pct": result_pct,
+            "status": status_30d,
+            "signal_date": signal_date,
+            "composite_score": rec["composite_score"],
+            "period": "30d",
+        })
+
+        logger.info(f"  {ticker} (30d): {price_at_signal:.2f} → {current_price:.2f} ({result_pct:+.2f}%) = {status_30d}")
+
+    logger.info(f"Checked 30d: {len(results)}/{len(pending)} recommendations")
     return results
 
 
