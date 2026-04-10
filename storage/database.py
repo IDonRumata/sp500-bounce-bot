@@ -169,6 +169,19 @@ def init_db():
         )
     """)
 
+    # Phase 3b: Add 30-day check columns if not exist (migration)
+    for col_sql in [
+        "ALTER TABLE recommendations ADD COLUMN check_date_30d TEXT",
+        "ALTER TABLE recommendations ADD COLUMN price_at_check_30d REAL",
+        "ALTER TABLE recommendations ADD COLUMN result_pct_30d REAL",
+        "ALTER TABLE recommendations ADD COLUMN status_30d TEXT DEFAULT 'pending_30d'",
+    ]:
+        try:
+            conn.execute(col_sql)
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+
     # Phase 4: Indexes on user_id columns (safe after migration)
     for idx_sql in [
         "CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)",
@@ -431,11 +444,13 @@ def cache_cleanup():
 
 # --- Recommendations ---
 
-def _calc_check_date(signal_date: str, business_days: int) -> str:
-    """Calculate check date by adding N business days to signal date."""
+def _calc_check_date(signal_date: str, days: int, calendar_days: bool = False) -> str:
+    """Calculate check date by adding N business or calendar days to signal date."""
     dt = datetime.strptime(signal_date, "%Y-%m-%d")
+    if calendar_days:
+        return (dt + timedelta(days=days)).strftime("%Y-%m-%d")
     added = 0
-    while added < business_days:
+    while added < days:
         dt += timedelta(days=1)
         if dt.weekday() < 5:  # Mon-Fri
             added += 1
@@ -453,6 +468,7 @@ def save_recommendations(stocks: list[dict], market_ctx: dict, report_date: str)
             scores = stock.get("scores", {})
             check_date = _calc_check_date(report_date, CHECK_PERIOD_DAYS)
 
+            check_date_30d = _calc_check_date(report_date, 30, calendar_days=True)
             conn.execute("""
                 INSERT INTO recommendations
                 (signal_date, ticker, price_at_signal, rsi, macd_direction,
@@ -460,8 +476,8 @@ def save_recommendations(stocks: list[dict], market_ctx: dict, report_date: str)
                  composite_score, bounce_probability,
                  technical_score, fundamental_score, sentiment_score, market_score,
                  pe_ratio, eps_growth, quality_grade, sector,
-                 market_regime, check_date, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                 market_regime, check_date, status, check_date_30d, status_30d)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 'pending_30d')
             """, (
                 report_date,
                 tech.get("symbol", "?"),
@@ -484,6 +500,7 @@ def save_recommendations(stocks: list[dict], market_ctx: dict, report_date: str)
                 fund.get("sector", "Unknown"),
                 regime,
                 check_date,
+                check_date_30d,
             ))
         conn.commit()
         logger.info(f"Saved {len(stocks)} recommendations for {report_date}")
@@ -528,11 +545,23 @@ def save_market_snapshot(market_ctx: dict, report_date: str,
 
 
 def get_pending_recommendations() -> list[dict]:
-    """Get recommendations ready for result checking."""
+    """Get recommendations ready for 10-day result checking."""
     today = datetime.now().strftime("%Y-%m-%d")
     conn = get_connection()
     rows = conn.execute(
         "SELECT * FROM recommendations WHERE status = 'pending' AND check_date <= ?",
+        (today,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_pending_30d_recommendations() -> list[dict]:
+    """Get recommendations ready for 30-day result checking."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM recommendations WHERE status_30d = 'pending_30d' AND check_date_30d <= ? AND check_date_30d IS NOT NULL",
         (today,),
     ).fetchall()
     conn.close()
@@ -551,6 +580,20 @@ def update_recommendation_result(rec_id: int, price_at_check: float,
             status = ?, updated_at = datetime('now')
         WHERE id = ?
     """, (price_at_check, result_pct, max_price, min_price, status, rec_id))
+    conn.commit()
+    conn.close()
+
+
+def update_recommendation_30d_result(rec_id: int, price_at_check: float,
+                                     result_pct: float, status_30d: str):
+    """Update a recommendation with 30-day check results."""
+    conn = get_connection()
+    conn.execute("""
+        UPDATE recommendations
+        SET price_at_check_30d = ?, result_pct_30d = ?,
+            status_30d = ?, updated_at = datetime('now')
+        WHERE id = ?
+    """, (price_at_check, result_pct, status_30d, rec_id))
     conn.commit()
     conn.close()
 
@@ -694,3 +737,59 @@ def get_stats_summary() -> dict:
         "worst": dict(worst) if worst else None,
         "score_bins": [dict(r) for r in score_bins],
     }
+
+
+def get_performance_stats(user_id: str) -> dict:
+    """Calculate theoretical (all recs) vs actual (user portfolio) performance."""
+    conn = get_connection()
+
+    # Theoretical: all checked recommendations
+    theo_rows = conn.execute("""
+        SELECT ticker, result_pct, status
+        FROM recommendations
+        WHERE status != 'pending' AND result_pct IS NOT NULL
+    """).fetchall()
+
+    theoretical = {}
+    if theo_rows:
+        returns = [r["result_pct"] for r in theo_rows]
+        wins = [r for r in returns if r > 0]
+        best = max(theo_rows, key=lambda r: r["result_pct"])
+        worst = min(theo_rows, key=lambda r: r["result_pct"])
+        theoretical = {
+            "total": len(conn.execute("SELECT id FROM recommendations").fetchall()),
+            "checked": len(returns),
+            "avg_return": round(sum(returns) / len(returns), 2),
+            "win_rate": round(len(wins) / len(returns) * 100, 1),
+            "best_ticker": best["ticker"],
+            "best_pct": best["result_pct"],
+            "worst_ticker": worst["ticker"],
+            "worst_pct": worst["result_pct"],
+        }
+
+    # Actual: user's portfolio (closed + open)
+    closed = conn.execute("""
+        SELECT ticker, pnl_pct, pnl_abs
+        FROM portfolio
+        WHERE user_id = ? AND status = 'closed' AND pnl_pct IS NOT NULL
+    """, (user_id,)).fetchall()
+
+    open_pos = conn.execute("""
+        SELECT ticker, buy_price, shares
+        FROM portfolio
+        WHERE user_id = ? AND status = 'open'
+    """, (user_id,)).fetchall()
+
+    actual = {"total": len(closed) + len(open_pos), "open": len(open_pos), "closed": len(closed)}
+
+    if closed:
+        pnls = [r["pnl_pct"] for r in closed]
+        pnl_abs = [r["pnl_abs"] for r in closed]
+        wins = [p for p in pnls if p > 0]
+        actual["avg_return"] = round(sum(pnls) / len(pnls), 2)
+        actual["total_pnl"] = round(sum(pnl_abs), 2)
+        actual["win_rate"] = round(len(wins) / len(pnls) * 100, 1)
+
+    conn.close()
+
+    return {"theoretical": theoretical, "actual": actual}

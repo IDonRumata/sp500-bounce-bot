@@ -310,6 +310,7 @@ async def main():
             BotCommand("take", "Купить акции (напр. /take AAPL 5)"),
             BotCommand("sell", "Продать позицию"),
             BotCommand("portfolio", "Портфель с P&L"),
+            BotCommand("performance", "Доходность: теория vs реальность"),
             BotCommand("backtest", "Бэктест на истории"),
             BotCommand("subscribe", "Подписаться на отчёты"),
             BotCommand("unsubscribe", "Отписаться от отчётов"),

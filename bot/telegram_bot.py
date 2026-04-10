@@ -15,7 +15,8 @@ from bot.formatters import (
     format_single_stock, format_watchlist, format_help, format_status,
     format_stats, format_check_results, format_settings, format_admin_users,
     format_alerts, format_portfolio, format_portfolio_history,
-    format_backtest,
+    format_backtest, format_entry_signals, format_exit_signals,
+    format_performance,
 )
 from storage.database import (
     get_last_report, get_watchlist,
@@ -24,7 +25,7 @@ from storage.database import (
     register_user, get_user, get_all_active_users,
     get_subscribed_users, update_user_setting,
 )
-from evaluation.check_results import check_pending_results
+from evaluation.check_results import check_pending_results, check_pending_30d_results
 
 # Will be set by main.py
 run_full_analysis = None
@@ -559,6 +560,26 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(context, chat_id, "❌ Ошибка загрузки портфеля.")
 
 
+async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /performance — show theoretical vs actual portfolio returns."""
+    if not _is_authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    user_id = str(chat_id)
+
+    await _safe_send(context, chat_id, "⏳ Считаю доходность...")
+
+    try:
+        from storage.database import get_performance_stats
+        stats = await asyncio.get_event_loop().run_in_executor(
+            None, get_performance_stats, user_id,
+        )
+        await _safe_send(context, chat_id, format_performance(stats))
+    except Exception as e:
+        logger.error(f"cmd_performance failed: {e}", exc_info=True)
+        await _safe_send(context, chat_id, "❌ Ошибка подсчёта доходности.")
+
+
 # ---- Backtest Command ----
 
 async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -698,23 +719,45 @@ async def check_results_job(context: ContextTypes.DEFAULT_TYPE):
     """Job callback: check pending recommendation results after market close."""
     logger.info("Check results job triggered")
 
+    subscribers = get_subscribed_users()
+    if not subscribers and TELEGRAM_CHAT_ID:
+        subscribers = [TELEGRAM_CHAT_ID]
+
+    # 10-day check
     try:
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(None, check_pending_results)
         if results:
             msg = format_check_results(results)
-            subscribers = get_subscribed_users()
-            if not subscribers and TELEGRAM_CHAT_ID:
-                subscribers = [TELEGRAM_CHAT_ID]
             for cid in subscribers:
                 try:
                     await _safe_send(context.bot, cid, msg)
+                except telegram.error.Forbidden:
+                    logger.warning(f"User {cid} blocked bot (10d check)")
                 except Exception as e:
-                    logger.warning(f"Failed to send check results to {cid}: {e}")
+                    logger.warning(f"Failed to send 10d results to {cid}: {e}")
         else:
-            logger.info("No pending results to report")
+            logger.info("No pending 10d results to report")
     except Exception as e:
-        logger.error(f"Check results job failed: {e}", exc_info=True)
+        logger.error(f"Check results (10d) job failed: {e}", exc_info=True)
+
+    # 30-day check
+    try:
+        loop = asyncio.get_event_loop()
+        results_30d = await loop.run_in_executor(None, check_pending_30d_results)
+        if results_30d:
+            msg_30d = format_check_results(results_30d, period="30д")
+            for cid in subscribers:
+                try:
+                    await _safe_send(context.bot, cid, msg_30d)
+                except telegram.error.Forbidden:
+                    logger.warning(f"User {cid} blocked bot (30d check)")
+                except Exception as e:
+                    logger.warning(f"Failed to send 30d results to {cid}: {e}")
+        else:
+            logger.info("No pending 30d results to report")
+    except Exception as e:
+        logger.error(f"Check results (30d) job failed: {e}", exc_info=True)
 
 
 async def weekly_stats_job(context: ContextTypes.DEFAULT_TYPE):
@@ -737,24 +780,59 @@ async def weekly_stats_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def watchlist_alert_job(context: ContextTypes.DEFAULT_TYPE):
-    """Job callback: check watchlist tickers and send alerts."""
-    from alerts.watchlist_monitor import check_watchlist_alerts
+    """Job callback: check watchlist alerts, entry signals, and exit signals."""
+    from alerts.watchlist_monitor import check_watchlist_alerts, check_entry_signals, check_exit_signals
 
+    # 1. Standard watchlist alerts (price/RSI)
     try:
         loop = asyncio.get_event_loop()
         alerts_by_user = await loop.run_in_executor(None, check_watchlist_alerts)
-        if not alerts_by_user:
-            return
-        for uid, alerts in alerts_by_user.items():
-            try:
-                msg = format_alerts(alerts)
-                if msg:
-                    await _safe_send(context.bot, uid, msg)
-            except Exception as e:
-                logger.warning(f"Failed to send alerts to {uid}: {e}")
-        logger.info(f"Sent alerts to {len(alerts_by_user)} users")
+        if alerts_by_user:
+            for uid, alerts in alerts_by_user.items():
+                try:
+                    msg = format_alerts(alerts)
+                    if msg:
+                        await _safe_send(context.bot, uid, msg)
+                except telegram.error.Forbidden:
+                    logger.warning(f"User {uid} blocked bot (alerts)")
+                except Exception as e:
+                    logger.warning(f"Failed to send alerts to {uid}: {e}")
     except Exception as e:
         logger.error(f"Watchlist alert job failed: {e}", exc_info=True)
+
+    # 2. Entry signals (bounce opportunities on watchlist)
+    try:
+        entry_signals = await loop.run_in_executor(None, check_entry_signals)
+        if entry_signals:
+            for uid, signals in entry_signals.items():
+                try:
+                    msg = format_entry_signals(signals)
+                    if msg:
+                        await _safe_send(context.bot, uid, msg)
+                except telegram.error.Forbidden:
+                    logger.warning(f"User {uid} blocked bot (entry signals)")
+                except Exception as e:
+                    logger.warning(f"Failed to send entry signals to {uid}: {e}")
+            logger.info(f"Sent entry signals to {len(entry_signals)} users")
+    except Exception as e:
+        logger.error(f"Entry signals check failed: {e}", exc_info=True)
+
+    # 3. Exit signals (for open positions)
+    try:
+        exit_signals = await loop.run_in_executor(None, check_exit_signals)
+        if exit_signals:
+            for uid, signals in exit_signals.items():
+                try:
+                    msg = format_exit_signals(signals)
+                    if msg:
+                        await _safe_send(context.bot, uid, msg)
+                except telegram.error.Forbidden:
+                    logger.warning(f"User {uid} blocked bot (exit signals)")
+                except Exception as e:
+                    logger.warning(f"Failed to send exit signals to {uid}: {e}")
+            logger.info(f"Sent exit signals to {len(exit_signals)} users")
+    except Exception as e:
+        logger.error(f"Exit signals check failed: {e}", exc_info=True)
 
 
 # ---- Bot Setup ----
@@ -778,6 +856,7 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("take", cmd_take))
     app.add_handler(CommandHandler("sell", cmd_sell))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
+    app.add_handler(CommandHandler("performance", cmd_performance))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))

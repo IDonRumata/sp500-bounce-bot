@@ -204,18 +204,19 @@ def format_stats(stats: dict) -> str:
     return msg
 
 
-def format_check_results(results: list[dict]) -> str:
+def format_check_results(results: list[dict], period: str = "10д") -> str:
     """Format check results for Telegram notification."""
     if not results:
         return ""
 
-    success_count = sum(1 for r in results if r["status"] == "success")
-    failure_count = sum(1 for r in results if r["status"] == "failure")
+    success_count = sum(1 for r in results if "success" in r["status"])
+    failure_count = sum(1 for r in results if "failure" in r["status"])
 
-    msg = f"📋 *Проверка рекомендаций* ({len(results)} шт.)\n\n"
+    msg = f"📋 *Проверка рекомендаций {period}* ({len(results)} шт.)\n\n"
 
     for r in results:
-        status_emoji = {"success": "✅", "failure": "❌", "neutral": "➖"}.get(r["status"], "❓")
+        s = r["status"]
+        status_emoji = "✅" if "success" in s else ("❌" if "failure" in s else "➖")
         msg += f"{status_emoji} *{r['ticker']}*: "
         msg += f"${r['price_at_signal']:.2f} → ${r['price_at_check']:.2f} "
         msg += f"(*{r['result_pct']:+.2f}%*)\n"
@@ -249,6 +250,93 @@ def format_alerts(alerts: list[dict]) -> str:
         if a.get("rsi") is not None:
             msg += f" | RSI: {a['rsi']}"
         msg += "\n"
+    return msg
+
+
+def format_entry_signals(signals: list[dict]) -> str:
+    """Format entry (buy) signals for watchlist tickers."""
+    if not signals:
+        return ""
+
+    msg = f"🎯 *Сигналы на ВХОД* ({len(signals)})\n\n"
+    for s in signals:
+        link = f"https://www.tradingview.com/chart/?symbol={s['ticker']}"
+        msg += f"🟢 [{s['ticker']}]({link}) — *хорошая точка входа*\n"
+        msg += f"   Цена: ${s['price']} | RSI: {s['rsi']} | Просадка: {s['drawdown']:.1f}%\n"
+        msg += f"   Tech score: {s['tech_score']}"
+
+        extras = []
+        if s.get("divergence"):
+            extras.append("RSI дивергенция")
+        if s.get("macd_bullish"):
+            extras.append("MACD разворот")
+        if s.get("bb_below"):
+            extras.append("ниже BB")
+        if extras:
+            msg += f" ({', '.join(extras)})"
+        msg += f"\n   Купить: `/take {s['ticker']} QTY`\n\n"
+
+    return msg
+
+
+def format_exit_signals(signals: list[dict]) -> str:
+    """Format exit (sell) signals for open positions."""
+    if not signals:
+        return ""
+
+    type_emoji = {
+        "exit_take_profit": "💰",
+        "exit_stop_loss": "🛑",
+        "exit_overbought": "📈",
+    }
+
+    msg = f"🔔 *Сигналы на ВЫХОД* ({len(signals)})\n\n"
+    for s in signals:
+        emoji = type_emoji.get(s["alert_type"], "⚠️")
+        link = f"https://www.tradingview.com/chart/?symbol={s['ticker']}"
+        msg += f"{emoji} [{s['ticker']}]({link}): {s['reason']}\n"
+        msg += f"   Покупка: ${s['buy_price']:.2f} → Сейчас: ${s['price']:.2f}"
+        msg += f" (*{s['pnl_pct']:+.1f}%*)\n"
+        msg += f"   Продать: `/sell {s['ticker']}`\n\n"
+
+    return msg
+
+
+def format_performance(stats: dict) -> str:
+    """Format portfolio performance comparison: theoretical vs actual."""
+    msg = "📊 *Доходность рекомендаций*\n\n"
+
+    # Theoretical (all recs)
+    theo = stats.get("theoretical", {})
+    if theo:
+        msg += "*Теоретическая* (все рекомендации):\n"
+        msg += f"  Всего сигналов: {theo['total']}\n"
+        msg += f"  Проверено: {theo['checked']}\n"
+        if theo["checked"] > 0:
+            msg += f"  Средний результат: *{theo['avg_return']:+.2f}%*\n"
+            msg += f"  Win rate: {theo['win_rate']:.1f}%\n"
+            msg += f"  Лучшая: {theo['best_ticker']} *{theo['best_pct']:+.2f}%*\n"
+            msg += f"  Худшая: {theo['worst_ticker']} *{theo['worst_pct']:+.2f}%*\n"
+    else:
+        msg += "*Теоретическая:* нет данных\n"
+
+    msg += "\n"
+
+    # Actual (user's portfolio)
+    actual = stats.get("actual", {})
+    if actual and actual.get("total", 0) > 0:
+        msg += "*Реальная* (ваш портфель):\n"
+        msg += f"  Сделок: {actual['total']} (открыто: {actual['open']}, закрыто: {actual['closed']})\n"
+        if actual.get("avg_return") is not None:
+            msg += f"  Средний P&L: *{actual['avg_return']:+.2f}%*\n"
+        if actual.get("total_pnl") is not None:
+            msg += f"  Общий P&L: *${actual['total_pnl']:+,.2f}*\n"
+        if actual.get("win_rate") is not None:
+            msg += f"  Win rate: {actual['win_rate']:.1f}%\n"
+    else:
+        msg += "*Реальная:* позиций нет\n"
+        msg += "Откройте позицию: `/take AAPL 5`\n"
+
     return msg
 
 
