@@ -311,6 +311,7 @@ async def main():
             BotCommand("sell", "Продать позицию"),
             BotCommand("portfolio", "Портфель с P&L"),
             BotCommand("performance", "Доходность: теория vs реальность"),
+            BotCommand("chart", "Графики статистики"),
             BotCommand("backtest", "Бэктест на истории"),
             BotCommand("subscribe", "Подписаться на отчёты"),
             BotCommand("unsubscribe", "Отписаться от отчётов"),

@@ -197,14 +197,22 @@ def snapshot_all_recommendations() -> dict:
     if not enriched:
         return {}
 
-    # Aggregate stats
+    # Aggregate stats (over all recs, before deduplication)
     returns = [e["pnl_pct"] for e in enriched]
     wins = [r for r in returns if r > 0]
     avg_return = round(sum(returns) / len(returns), 2)
     win_rate = round(len(wins) / len(returns) * 100, 1)
 
+    # Deduplicate by ticker for top/bottom display: keep best P&L per unique ticker
+    best_per_ticker: dict[str, dict] = {}
+    for e in enriched:
+        t = e["ticker"]
+        if t not in best_per_ticker or e["pnl_pct"] > best_per_ticker[t]["pnl_pct"]:
+            best_per_ticker[t] = e
+    deduped = list(best_per_ticker.values())
+
     # Sort by P&L for top/bottom
-    sorted_by_pnl = sorted(enriched, key=lambda x: x["pnl_pct"], reverse=True)
+    sorted_by_pnl = sorted(deduped, key=lambda x: x["pnl_pct"], reverse=True)
     top5 = sorted_by_pnl[:5]
     bottom5 = sorted_by_pnl[-5:][::-1]  # worst first
 

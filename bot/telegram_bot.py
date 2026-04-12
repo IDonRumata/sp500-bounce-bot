@@ -580,6 +580,49 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(context, chat_id, "❌ Ошибка подсчёта доходности.")
 
 
+# ---- Chart Command ----
+
+async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /chart — send statistics PNG chart."""
+    if not _is_authorized(update):
+        return
+    chat_id = update.effective_chat.id
+
+    await _safe_send(context, chat_id, "📊 Генерирую графики...")
+
+    try:
+        from storage.database import get_stats_summary
+        from charts.generator import generate_stats_chart
+
+        stats = await asyncio.get_event_loop().run_in_executor(None, get_stats_summary)
+        total_checked = stats.get("total_checked", 0)
+        if total_checked == 0:
+            await _safe_send(context, chat_id, "📊 Нет проверенных рекомендаций для графиков.")
+            return
+
+        png_bytes = await asyncio.get_event_loop().run_in_executor(
+            None, generate_stats_chart, stats
+        )
+        if png_bytes is None:
+            await _safe_send(context, chat_id, "❌ Не удалось сгенерировать график.")
+            return
+
+        caption = (
+            f"📊 Статистика бота — {total_checked} проверенных рекомендаций\n"
+            f"Win rate: {stats.get('win_rate_pct', 0)}% (>0%) | "
+            f"Успех: {stats.get('success_pct', 0)}% (>+3%) | "
+            f"Avg: {stats.get('avg_result_pct', 0):+.2f}%"
+        )
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=png_bytes,
+            caption=caption,
+        )
+    except Exception as e:
+        logger.error(f"cmd_chart failed: {e}", exc_info=True)
+        await _safe_send(context, chat_id, "❌ Ошибка генерации графика.")
+
+
 # ---- Backtest Command ----
 
 async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -889,6 +932,7 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("sell", cmd_sell))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("performance", cmd_performance))
+    app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("backtest", cmd_backtest))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))

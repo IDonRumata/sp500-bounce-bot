@@ -733,6 +733,12 @@ def get_stats_summary() -> dict:
     # Total recommendations ever
     total_all = conn.execute("SELECT COUNT(*) as cnt FROM recommendations").fetchone()["cnt"]
 
+    # Win rate >0%: count checked recs with positive result
+    win_count_row = conn.execute(
+        "SELECT COUNT(*) as cnt FROM recommendations WHERE status != 'pending' AND result_pct > 0"
+    ).fetchone()
+    win_count = win_count_row["cnt"] if win_count_row else 0
+
     conn.close()
 
     total_checked = sum(v["count"] for v in checked.values())
@@ -753,11 +759,27 @@ def get_stats_summary() -> dict:
         "neutral": neutral_count,
         "failure": failure_count,
         "success_pct": round(success_count / total_checked * 100, 1) if total_checked else 0,
+        "win_count": win_count,
+        "win_rate_pct": round(win_count / total_checked * 100, 1) if total_checked else 0,
         "avg_result_pct": all_avg,
         "best": dict(best) if best else None,
         "worst": dict(worst) if worst else None,
         "score_bins": [dict(r) for r in score_bins],
     }
+
+
+def get_all_checked_recommendations() -> list[dict]:
+    """Return all checked (non-pending) recommendations for charting."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT ticker, signal_date, composite_score, price_at_signal,
+               price_at_check, result_pct, status
+        FROM recommendations
+        WHERE status != 'pending' AND result_pct IS NOT NULL
+        ORDER BY signal_date ASC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_performance_stats(user_id: str) -> dict:

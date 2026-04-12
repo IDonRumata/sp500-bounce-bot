@@ -177,11 +177,14 @@ def format_stats(stats: dict) -> str:
     msg += f"Всего: *{total}* | Проверено: *{checked}* | Ожидают: *{pending}*\n\n"
 
     if checked > 0:
-        msg += f"✅ Успех (+3%): *{success}* ({success_pct}%)\n"
-        msg += f"➖ Нейтрально: *{neutral}*\n"
-        msg += f"❌ Неудача (-3%): *{failure}*\n"
+        win_count = stats.get("win_count", 0)
+        win_rate_pct = stats.get("win_rate_pct", 0)
+        msg += f"📈 Win rate (>0%): *{win_count}/{checked}* = *{win_rate_pct}%*\n"
+        msg += f"✅ Успех (>+3%): *{success}* ({success_pct}%)\n"
+        msg += f"➖ Нейтрально (-3%..+3%): *{neutral}*\n"
+        msg += f"❌ Убыток (<-3%): *{failure}*\n"
         if avg_pct is not None:
-            msg += f"\n📈 Средний результат: *{avg_pct:+.2f}%*\n"
+            msg += f"\n💹 Средний результат: *{avg_pct:+.2f}%*\n"
 
         # Best / worst
         best = stats.get("best")
@@ -361,10 +364,10 @@ def format_snapshot_digest(snapshot: dict) -> str:
     wr_emoji = "🟢" if wr >= 55 else ("🟡" if wr >= 45 else "🔴")
 
     msg = f"📊 *Динамика рекомендаций* — {date}\n"
-    msg += f"Отслеживается: *{total}* позиций\n\n"
-    msg += f"{avg_emoji} Средний P&L: *{avg:+.2f}%*\n"
-    msg += f"{wr_emoji} В плюсе: *{wins}* | В нуле: *{flat}* | В минусе: *{losses}*\n"
-    msg += f"Win rate (>0%): *{wr}%*\n"
+    msg += f"Отслеживается: *{total}* активных позиций _(нереализованные)_\n\n"
+    msg += f"{avg_emoji} Средний P&L сейчас: *{avg:+.2f}%*\n"
+    msg += f"{wr_emoji} В плюсе: *{wins}* | Около нуля: *{flat}* | В минусе: *{losses}*\n"
+    msg += f"В плюсе сейчас: *{wr}%* _(live, не финальный)_\n"
 
     # Age breakdown
     fresh_avg = snapshot.get("fresh_avg")
