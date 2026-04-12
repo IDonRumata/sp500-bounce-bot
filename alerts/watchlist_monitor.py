@@ -12,7 +12,8 @@ from analysis.technical import calc_rsi, full_technical_analysis
 from scoring.scorer import _technical_score
 from config import (
     ALERT_PRICE_PCT, ALERT_RSI_OVERSOLD, ALERT_RSI_OVERBOUGHT,
-    ALERT_COOLDOWN_HOURS, MIN_COMPOSITE_SCORE, logger,
+    ALERT_COOLDOWN_HOURS, MIN_COMPOSITE_SCORE,
+    STOP_LOSS_PCT, TAKE_PROFIT_PCT, logger,
 )
 from storage.database import (
     get_watchlist, get_all_active_users,
@@ -26,11 +27,11 @@ ENTRY_SIGNAL_DRAWDOWN = -15    # Drawdown must be deeper than this (%)
 ENTRY_SIGNAL_TECH_SCORE = 65   # Technical score must be above this
 ENTRY_SIGNAL_COOLDOWN_H = 24   # Don't repeat entry signal for 24h
 
-# Exit signal thresholds
-EXIT_TAKE_PROFIT_PCT = 10.0    # Suggest exit at +10%
-EXIT_STOP_LOSS_PCT = -7.0      # Warn at -7%
-EXIT_RSI_OVERBOUGHT = 70       # RSI overbought → consider exit
-EXIT_SIGNAL_COOLDOWN_H = 8     # Don't repeat exit signal for 8h
+# Exit signal thresholds — derived from config SL/TP
+EXIT_TAKE_PROFIT_PCT = TAKE_PROFIT_PCT   # from config (+15%)
+EXIT_STOP_LOSS_PCT = STOP_LOSS_PCT       # from config (-8%)
+EXIT_RSI_OVERBOUGHT = 70                 # RSI overbought → consider exit
+EXIT_SIGNAL_COOLDOWN_H = 8              # Don't repeat exit signal for 8h
 
 
 def _is_market_open() -> bool:

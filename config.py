@@ -32,6 +32,12 @@ CHECK_PERIOD_DAYS = int(os.getenv("CHECK_PERIOD_DAYS", "10"))
 SUCCESS_THRESHOLD_PCT = float(os.getenv("SUCCESS_THRESHOLD_PCT", "3.0"))
 FAILURE_THRESHOLD_PCT = float(os.getenv("FAILURE_THRESHOLD_PCT", "-3.0"))
 
+# --- SL / TP levels (based on historical distribution analysis 2026-04-12) ---
+# SL at -8%: only 3/98 recs fell below -8%, avoids noise zone (-5%..0%)
+# TP at +15%: captures main profit zone, doesn't cut best winners
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "-8.0"))
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "15.0"))
+
 # --- Weekly stats report ---
 WEEKLY_REPORT_DAY = os.getenv("WEEKLY_REPORT_DAY", "sun")
 WEEKLY_REPORT_HOUR = int(os.getenv("WEEKLY_REPORT_HOUR", "10"))

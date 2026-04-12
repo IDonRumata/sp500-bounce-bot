@@ -90,7 +90,17 @@ def format_stocks_table(stocks_data: list[dict]) -> str:
         pe_fwd = f.get('pe_forward')
         pe_str = f"{pe_fwd}" if pe_fwd is not None else "N/A"
         msg += f"\n   P/E: {pe_str} | Рост EPS: {eg_str}"
-        msg += f" | Качество: {f.get('quality_grade', '?')}\n\n"
+        msg += f" | Качество: {f.get('quality_grade', '?')}\n"
+
+        # SL / TP levels
+        price = t.get('current_price')
+        if price:
+            from config import STOP_LOSS_PCT, TAKE_PROFIT_PCT
+            sl = round(price * (1 + STOP_LOSS_PCT / 100), 2)
+            tp = round(price * (1 + TAKE_PROFIT_PCT / 100), 2)
+            msg += f"   🛑 SL: ${sl} ({STOP_LOSS_PCT}%) | 🎯 TP: ${tp} (+{TAKE_PROFIT_PCT}%)\n\n"
+        else:
+            msg += "\n"
 
     msg += "⚠️ _Не является инвестиционной рекомендацией_"
     return msg
@@ -261,11 +271,15 @@ def format_entry_signals(signals: list[dict]) -> str:
     if not signals:
         return ""
 
+    from config import STOP_LOSS_PCT, TAKE_PROFIT_PCT
     msg = f"🎯 *Сигналы на ВХОД* ({len(signals)})\n\n"
     for s in signals:
         link = f"https://www.tradingview.com/chart/?symbol={s['ticker']}"
+        price = s['price']
+        sl = round(price * (1 + STOP_LOSS_PCT / 100), 2)
+        tp = round(price * (1 + TAKE_PROFIT_PCT / 100), 2)
         msg += f"🟢 [{s['ticker']}]({link}) — *хорошая точка входа*\n"
-        msg += f"   Цена: ${s['price']} | RSI: {s['rsi']} | Просадка: {s['drawdown']:.1f}%\n"
+        msg += f"   Цена: ${price} | RSI: {s['rsi']} | Просадка: {s['drawdown']:.1f}%\n"
         msg += f"   Tech score: {s['tech_score']}"
 
         extras = []
@@ -277,6 +291,7 @@ def format_entry_signals(signals: list[dict]) -> str:
             extras.append("ниже BB")
         if extras:
             msg += f" ({', '.join(extras)})"
+        msg += f"\n   🛑 SL: ${sl} ({STOP_LOSS_PCT}%) | 🎯 TP: ${tp} (+{TAKE_PROFIT_PCT}%)"
         msg += f"\n   Купить: `/take {s['ticker']} QTY`\n\n"
 
     return msg
@@ -306,29 +321,35 @@ def format_exit_signals(signals: list[dict]) -> str:
 
 
 def format_performance(stats: dict) -> str:
-    """Format portfolio performance comparison: theoretical vs actual."""
+    """Format portfolio performance: raw, SL-capped simulation, actual."""
     msg = "📊 *Доходность рекомендаций*\n\n"
 
-    # Theoretical (all recs)
+    # Theoretical (raw, no SL)
     theo = stats.get("theoretical", {})
     if theo:
-        msg += "*Теоретическая* (все рекомендации):\n"
-        msg += f"  Всего сигналов: {theo['total']}\n"
-        msg += f"  Проверено: {theo['checked']}\n"
+        msg += "*Без стоп-лосса* (все рекомендации):\n"
+        msg += f"  Всего: {theo['total']} | Проверено: {theo['checked']}\n"
         if theo["checked"] > 0:
-            msg += f"  Средний результат: *{theo['avg_return']:+.2f}%*\n"
-            msg += f"  Win rate: {theo['win_rate']:.1f}%\n"
-            msg += f"  Лучшая: {theo['best_ticker']} *{theo['best_pct']:+.2f}%*\n"
-            msg += f"  Худшая: {theo['worst_ticker']} *{theo['worst_pct']:+.2f}%*\n"
-    else:
-        msg += "*Теоретическая:* нет данных\n"
+            msg += f"  Avg: *{theo['avg_return']:+.2f}%* | WR: {theo['win_rate']:.1f}%\n"
+            msg += f"  🏆 {theo['best_ticker']} *{theo['best_pct']:+.2f}%* | "
+            msg += f"💀 {theo['worst_ticker']} *{theo['worst_pct']:+.2f}%*\n"
+
+    # Simulated portfolio with SL
+    sim = stats.get("simulated", {})
+    if sim:
+        msg += f"\n*С стоп-лоссом {sim['max_loss_per_trade']}%* (по $1000 на сделку):\n"
+        msg += f"  Сделок: {sim['trades']} | Вложено: ${sim['invested']:,.0f}\n"
+        pnl_emoji = "📈" if sim["total_pnl"] >= 0 else "📉"
+        msg += f"  {pnl_emoji} P&L: *${sim['total_pnl']:+,.2f}* (*{sim['portfolio_return_pct']:+.2f}%*)\n"
+        msg += f"  Avg/сделку: *{sim['avg_per_trade']:+.2f}%* | WR: {sim['win_rate']:.1f}%\n"
+        msg += f"  Лучшая: *{sim['best_trade']:+.2f}%* | Худшая: *{sim['worst_trade']:+.2f}%*\n"
 
     msg += "\n"
 
     # Actual (user's portfolio)
     actual = stats.get("actual", {})
     if actual and actual.get("total", 0) > 0:
-        msg += "*Реальная* (ваш портфель):\n"
+        msg += "*Ваш портфель:*\n"
         msg += f"  Сделок: {actual['total']} (открыто: {actual['open']}, закрыто: {actual['closed']})\n"
         if actual.get("avg_return") is not None:
             msg += f"  Средний P&L: *{actual['avg_return']:+.2f}%*\n"
@@ -337,7 +358,7 @@ def format_performance(stats: dict) -> str:
         if actual.get("win_rate") is not None:
             msg += f"  Win rate: {actual['win_rate']:.1f}%\n"
     else:
-        msg += "*Реальная:* позиций нет\n"
+        msg += "*Ваш портфель:* позиций нет\n"
         msg += "Откройте позицию: `/take AAPL 5`\n"
 
     return msg

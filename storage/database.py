@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from config import DB_PATH, CHECK_PERIOD_DAYS, SUCCESS_THRESHOLD_PCT, FAILURE_THRESHOLD_PCT, logger
+from config import DB_PATH, CHECK_PERIOD_DAYS, SUCCESS_THRESHOLD_PCT, FAILURE_THRESHOLD_PCT, STOP_LOSS_PCT, TAKE_PROFIT_PCT, logger
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -181,6 +181,44 @@ def init_db():
             conn.commit()
         except Exception:
             pass  # Column already exists
+
+    # Phase 3c: Add SL/TP columns (migration 2026-04-12)
+    for col_sql in [
+        "ALTER TABLE recommendations ADD COLUMN stop_loss_price REAL",
+        "ALTER TABLE recommendations ADD COLUMN take_profit_price REAL",
+        "ALTER TABLE recommendations ADD COLUMN stop_loss_pct REAL",
+        "ALTER TABLE recommendations ADD COLUMN take_profit_pct REAL",
+        "ALTER TABLE recommendations ADD COLUMN capped_result_pct REAL",
+    ]:
+        try:
+            conn.execute(col_sql)
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+
+    # Backfill SL/TP for existing recs that don't have them yet
+    try:
+        conn.execute("""
+            UPDATE recommendations
+            SET stop_loss_pct = ?,
+                take_profit_pct = ?,
+                stop_loss_price = ROUND(price_at_signal * (1 + ? / 100.0), 2),
+                take_profit_price = ROUND(price_at_signal * (1 + ? / 100.0), 2)
+            WHERE stop_loss_pct IS NULL AND price_at_signal IS NOT NULL
+        """, (STOP_LOSS_PCT, TAKE_PROFIT_PCT, STOP_LOSS_PCT, TAKE_PROFIT_PCT))
+        # Backfill capped_result_pct for checked recs
+        conn.execute("""
+            UPDATE recommendations
+            SET capped_result_pct = CASE
+                WHEN result_pct IS NULL THEN NULL
+                WHEN result_pct <= ? THEN ?
+                ELSE result_pct
+            END
+            WHERE capped_result_pct IS NULL AND status != 'pending'
+        """, (STOP_LOSS_PCT, STOP_LOSS_PCT))
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"SL/TP backfill note: {e}")
 
     # Phase 4: Indexes on user_id columns (safe after migration)
     for idx_sql in [
@@ -469,6 +507,9 @@ def save_recommendations(stocks: list[dict], market_ctx: dict, report_date: str)
             check_date = _calc_check_date(report_date, CHECK_PERIOD_DAYS)
 
             check_date_30d = _calc_check_date(report_date, 30, calendar_days=True)
+            price = tech.get("current_price")
+            sl_price = round(price * (1 + STOP_LOSS_PCT / 100), 2) if price else None
+            tp_price = round(price * (1 + TAKE_PROFIT_PCT / 100), 2) if price else None
             conn.execute("""
                 INSERT INTO recommendations
                 (signal_date, ticker, price_at_signal, rsi, macd_direction,
@@ -476,12 +517,14 @@ def save_recommendations(stocks: list[dict], market_ctx: dict, report_date: str)
                  composite_score, bounce_probability,
                  technical_score, fundamental_score, sentiment_score, market_score,
                  pe_ratio, eps_growth, quality_grade, sector,
-                 market_regime, check_date, status, check_date_30d, status_30d)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 'pending_30d')
+                 market_regime, check_date, status, check_date_30d, status_30d,
+                 stop_loss_price, take_profit_price, stop_loss_pct, take_profit_pct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 'pending_30d',
+                        ?, ?, ?, ?)
             """, (
                 report_date,
                 tech.get("symbol", "?"),
-                tech.get("current_price"),
+                price,
                 tech.get("rsi"),
                 "up" if tech.get("macd_histogram_rising") else "down",
                 1 if tech.get("rsi_bullish_divergence") else 0,
@@ -501,6 +544,7 @@ def save_recommendations(stocks: list[dict], market_ctx: dict, report_date: str)
                 regime,
                 check_date,
                 check_date_30d,
+                sl_price, tp_price, STOP_LOSS_PCT, TAKE_PROFIT_PCT,
             ))
         conn.commit()
         logger.info(f"Saved {len(stocks)} recommendations for {report_date}")
@@ -592,15 +636,17 @@ def get_pending_30d_recommendations() -> list[dict]:
 def update_recommendation_result(rec_id: int, price_at_check: float,
                                  result_pct: float, max_price: float | None,
                                  min_price: float | None, status: str):
-    """Update a recommendation with check results."""
+    """Update a recommendation with check results. Caps losses at SL level."""
+    capped = max(result_pct, STOP_LOSS_PCT)  # SL caps the worst case
     conn = get_connection()
     conn.execute("""
         UPDATE recommendations
         SET price_at_check = ?, result_pct = ?,
             max_price_in_period = ?, min_price_in_period = ?,
-            status = ?, updated_at = datetime('now')
+            status = ?, capped_result_pct = ?,
+            updated_at = datetime('now')
         WHERE id = ?
-    """, (price_at_check, result_pct, max_price, min_price, status, rec_id))
+    """, (price_at_check, result_pct, max_price, min_price, status, capped, rec_id))
     conn.commit()
     conn.close()
 
@@ -783,24 +829,27 @@ def get_all_checked_recommendations() -> list[dict]:
 
 
 def get_performance_stats(user_id: str) -> dict:
-    """Calculate theoretical (all recs) vs actual (user portfolio) performance."""
+    """Calculate theoretical, SL-capped simulated portfolio, and actual portfolio performance."""
     conn = get_connection()
 
-    # Theoretical: all checked recommendations
+    # Theoretical (raw): all checked recommendations, no SL applied
     theo_rows = conn.execute("""
-        SELECT ticker, result_pct, status
+        SELECT ticker, result_pct, capped_result_pct, status
         FROM recommendations
         WHERE status != 'pending' AND result_pct IS NOT NULL
     """).fetchall()
 
     theoretical = {}
+    simulated = {}
     if theo_rows:
+        # Raw returns
         returns = [r["result_pct"] for r in theo_rows]
         wins = [r for r in returns if r > 0]
         best = max(theo_rows, key=lambda r: r["result_pct"])
         worst = min(theo_rows, key=lambda r: r["result_pct"])
+        total_recs = conn.execute("SELECT COUNT(*) as cnt FROM recommendations").fetchone()["cnt"]
         theoretical = {
-            "total": len(conn.execute("SELECT id FROM recommendations").fetchall()),
+            "total": total_recs,
             "checked": len(returns),
             "avg_return": round(sum(returns) / len(returns), 2),
             "win_rate": round(len(wins) / len(returns) * 100, 1),
@@ -808,6 +857,26 @@ def get_performance_stats(user_id: str) -> dict:
             "best_pct": best["result_pct"],
             "worst_ticker": worst["ticker"],
             "worst_pct": worst["result_pct"],
+        }
+
+        # SL-capped simulated portfolio ($1000 per trade)
+        capped = [r["capped_result_pct"] if r["capped_result_pct"] is not None
+                  else max(r["result_pct"], STOP_LOSS_PCT) for r in theo_rows]
+        trade_size = 1000.0
+        total_invested = trade_size * len(capped)
+        trade_pnls = [trade_size * (pct / 100.0) for pct in capped]
+        total_pnl = sum(trade_pnls)
+        capped_wins = [p for p in capped if p > 0]
+        simulated = {
+            "trades": len(capped),
+            "invested": total_invested,
+            "total_pnl": round(total_pnl, 2),
+            "portfolio_return_pct": round(total_pnl / total_invested * 100, 2) if total_invested else 0,
+            "avg_per_trade": round(sum(capped) / len(capped), 2),
+            "win_rate": round(len(capped_wins) / len(capped) * 100, 1),
+            "max_loss_per_trade": STOP_LOSS_PCT,
+            "best_trade": round(max(capped), 2),
+            "worst_trade": round(min(capped), 2),
         }
 
     # Actual: user's portfolio (closed + open)
@@ -835,4 +904,4 @@ def get_performance_stats(user_id: str) -> dict:
 
     conn.close()
 
-    return {"theoretical": theoretical, "actual": actual}
+    return {"theoretical": theoretical, "simulated": simulated, "actual": actual}
