@@ -247,12 +247,19 @@ def format_stats(stats_10d: dict, stats_30d: dict | None = None,
     # ── СИМУЛЯЦИЯ ПОРТФЕЛЯ ────────────────────────────────
     if perf and perf.get("simulated"):
         sim = perf["simulated"]
-        pnl_emoji = "📈" if (sim.get("total_pnl", 0) or 0) >= 0 else "📉"
+        sim_pnl = sim.get("total_pnl", 0) or 0
+        sim_ret = sim.get("portfolio_return_pct", 0) or 0
+        sim_wr = sim.get("win_rate", 0) or 0
+        sim_avg = sim.get("avg_per_trade", 0) or 0
+        sim_trades = sim.get("trades", 0) or 0
+        sim_invested = sim.get("invested", 0) or 0
+        sim_sl = sim.get("max_loss_per_trade", -8)
+        pnl_emoji = "📈" if sim_pnl >= 0 else "📉"
         lines += [
-            f"━━━━━ 💹 *СИМУЛЯЦИЯ* ($1000/сделку, SL {sim.get('max_loss_per_trade', -8)}%) ━━━━━",
-            f"Сделок: {sim['trades']}  |  Вложено: ${sim['invested']:,.0f}",
-            f"{pnl_emoji} P&L: *${sim['total_pnl']:+,.2f}* (*{sim['portfolio_return_pct']:+.2f}%*)",
-            f"Win rate: *{sim['win_rate']}%*  |  Avg/сделку: *{sim['avg_per_trade']:+.2f}%*",
+            f"━━━━━ 💹 *СИМУЛЯЦИЯ* ($1000/сделку, SL {sim_sl}%) ━━━━━",
+            f"Сделок: {sim_trades}  |  Вложено: ${sim_invested:,.0f}",
+            f"{pnl_emoji} P&L: *${sim_pnl:+,.2f}* (*{sim_ret:+.2f}%*)",
+            f"Win rate: *{sim_wr}%*  |  Avg/сделку: *{sim_avg:+.2f}%*",
             "",
         ]
 
@@ -260,15 +267,15 @@ def format_stats(stats_10d: dict, stats_30d: dict | None = None,
     mode_labels = {"auto": "🤖 Авто", "hybrid": "🔀 Гибрид", "off": "⏸ Отключён"}
     mode_label = mode_labels.get(paper_mode, paper_mode)
     if paper and (paper.get("total", 0) > 0 or paper_mode != "off"):
-        open_c = paper.get("open_count", 0)
-        closed_c = paper.get("closed_count", 0)
-        skipped_c = paper.get("skipped_count", 0)
+        open_c = paper.get("open_count", 0) or 0
+        closed_c = paper.get("closed_count", 0) or 0
+        skipped_c = paper.get("skipped_count", 0) or 0
         lines += [f"━━━━━ 🤖 *PAPER TRADING* ({mode_label}) ━━━━━"]
         lines.append(f"Открыто: {open_c}  |  Закрыто: {closed_c}  |  Пропущено: {skipped_c}")
         if closed_c > 0:
-            wr_p = paper.get("win_rate", 0)
-            avg_p = paper.get("avg_pl_pct", 0)
-            pl_p = paper.get("total_realized_pl", 0)
+            wr_p = paper.get("win_rate", 0) or 0
+            avg_p = paper.get("avg_pl_pct", 0) or 0
+            pl_p = paper.get("total_realized_pl", 0) or 0
             lines.append(f"Win rate: *{wr_p:.1f}%*  |  Avg: *{avg_p:+.2f}%*  |  P&L: *${pl_p:+.2f}*")
         lines.append("Детали: `/paper`")
         lines.append("")
