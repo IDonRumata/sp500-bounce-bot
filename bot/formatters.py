@@ -703,14 +703,14 @@ def format_paper_dashboard(
 
     # Account block (from Alpaca API)
     if account:
-        equity = account.get("equity", 0)
-        initial = account.get("initial_balance", 100_000)
-        total_pl = account.get("total_pl", 0)
-        total_pl_pct = account.get("total_pl_pct", 0)
-        cash = account.get("cash", 0)
+        equity = account.get("equity", 0) or 0
+        initial = account.get("initial_balance", 100_000) or 100_000
+        total_pl = account.get("total_pl", 0) or 0
+        total_pl_pct = account.get("total_pl_pct", 0) or 0
+        cash = account.get("cash", 0) or 0
 
-        pl_sign = "+" if total_pl >= 0 else ""
-        pl_emoji = "📈" if total_pl >= 0 else "📉"
+        pl_sign = "+" if (total_pl or 0) >= 0 else ""
+        pl_emoji = "📈" if (total_pl or 0) >= 0 else "📉"
         lines += [
             f"💼 *Счёт Alpaca*",
             f"  Начальный капитал: ${initial:,.0f}",
@@ -738,16 +738,16 @@ def format_paper_dashboard(
         lines += ["🔓 Открытых позиций нет", ""]
 
     # Closed trades summary (from DB)
-    closed = stats.get("closed_count", 0)
-    skipped = stats.get("skipped_count", 0)
-    total_pl_closed = stats.get("total_realized_pl", 0.0)
-    win_rate = stats.get("win_rate", 0.0)
-    avg_pct = stats.get("avg_pl_pct", 0.0)
+    closed = stats.get("closed_count", 0) or 0
+    skipped = stats.get("skipped_count", 0) or 0
+    total_pl_closed = stats.get("total_realized_pl", 0.0) or 0.0
+    win_rate = stats.get("win_rate", 0.0) or 0.0
+    avg_pct = stats.get("avg_pl_pct", 0.0) or 0.0
 
     lines.append(f"📊 *Статистика закрытых сделок ({closed})*")
     if closed > 0:
-        pl_sign = "+" if total_pl_closed >= 0 else ""
-        avg_sign = "+" if avg_pct >= 0 else ""
+        pl_sign = "+" if (total_pl_closed or 0) >= 0 else ""
+        avg_sign = "+" if (avg_pct or 0) >= 0 else ""
         lines += [
             f"  Win rate: {win_rate:.1f}%",
             f"  Avg P&L: {avg_sign}{avg_pct:.2f}%",
