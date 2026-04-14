@@ -326,8 +326,14 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     try:
-        stats = get_stats_summary()
-        await _safe_send(context, chat_id, format_stats(stats))
+        from storage.database import get_30d_summary, get_performance_stats
+        stats_10d = get_stats_summary()
+        stats_30d = get_30d_summary()
+        perf = get_performance_stats(str(chat_id))
+        paper = get_paper_trades_stats()
+        paper_mode = get_setting("paper_trading_mode", "off")
+        msg = format_stats(stats_10d, stats_30d, perf, paper, paper_mode)
+        await _safe_send(context, chat_id, msg)
     except Exception as e:
         logger.error(f"Stats command failed: {e}", exc_info=True)
         await _safe_send(context, chat_id, "❌ Ошибка получения статистики.")
@@ -1218,8 +1224,15 @@ async def weekly_stats_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Weekly stats job triggered")
 
     try:
-        stats = get_stats_summary()
-        msg = "📅 *Еженедельная статистика*\n\n" + format_stats(stats)
+        from storage.database import get_30d_summary, get_performance_stats
+        stats_10d = get_stats_summary()
+        stats_30d = get_30d_summary()
+        perf = get_performance_stats(TELEGRAM_CHAT_ID or "0")
+        paper = get_paper_trades_stats()
+        paper_mode = get_setting("paper_trading_mode", "off")
+        msg = "📅 *Еженедельная статистика*\n\n" + format_stats(
+            stats_10d, stats_30d, perf, paper, paper_mode
+        )
         subscribers = get_subscribed_users()
         if not subscribers and TELEGRAM_CHAT_ID:
             subscribers = [TELEGRAM_CHAT_ID]

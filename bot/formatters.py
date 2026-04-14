@@ -169,52 +169,124 @@ def format_watchlist(symbols: list[str]) -> str:
     return msg
 
 
-def format_stats(stats: dict) -> str:
-    """Format recommendation statistics for /stats command."""
-    total = stats.get("total_all", 0)
+def format_stats(stats_10d: dict, stats_30d: dict | None = None,
+                 perf: dict | None = None, paper: dict | None = None,
+                 paper_mode: str = "off") -> str:
+    """
+    Unified statistics dashboard for /stats command.
+    Sections: 10-day results | 30-day results | Simulation | Paper Trading
+    """
+    today = datetime.now().strftime("%d.%m.%Y")
+    lines = [f"📊 *Статистика стратегии* — {today}", ""]
+
+    # ── ОБЗОР ──────────────────────────────────────────────
+    total = stats_10d.get("total_all", 0)
+    checked = stats_10d.get("total_checked", 0)
+    pending = stats_10d.get("pending", 0)
+
     if total == 0:
-        return "📊 *Статистика рекомендаций*\n\nДанных пока нет. Запустите `/run` для первого анализа."
+        return "📊 *Статистика*\n\nДанных пока нет. Запустите `/run` для первого анализа."
 
-    checked = stats.get("total_checked", 0)
-    pending = stats.get("pending", 0)
-    success = stats.get("success", 0)
-    neutral = stats.get("neutral", 0)
-    failure = stats.get("failure", 0)
-    success_pct = stats.get("success_pct", 0)
-    avg_pct = stats.get("avg_result_pct")
+    lines += [
+        "━━━━━ 📌 *ОБЗОР* ━━━━━",
+        f"Рекомендаций всего: *{total}*",
+        f"Проверено (10д): *{checked}* | Ожидают: *{pending}*",
+        "",
+    ]
 
-    msg = f"📊 *Статистика рекомендаций*\n\n"
-    msg += f"Всего: *{total}* | Проверено: *{checked}* | Ожидают: *{pending}*\n\n"
-
+    # ── 10-ДНЕВНЫЕ РЕЗУЛЬТАТЫ ──────────────────────────────
     if checked > 0:
-        win_count = stats.get("win_count", 0)
-        win_rate_pct = stats.get("win_rate_pct", 0)
-        msg += f"📈 Win rate (>0%): *{win_count}/{checked}* = *{win_rate_pct}%*\n"
-        msg += f"✅ Успех (>+3%): *{success}* ({success_pct}%)\n"
-        msg += f"➖ Нейтрально (-3%..+3%): *{neutral}*\n"
-        msg += f"❌ Убыток (<-3%): *{failure}*\n"
-        if avg_pct is not None:
-            msg += f"\n💹 Средний результат: *{avg_pct:+.2f}%*\n"
+        win_count = stats_10d.get("win_count", 0)
+        win_rate = stats_10d.get("win_rate_pct", 0)
+        success = stats_10d.get("success", 0)
+        neutral = stats_10d.get("neutral", 0)
+        failure = stats_10d.get("failure", 0)
+        avg_pct = stats_10d.get("avg_result_pct", 0) or 0
+        wr_emoji = "🟢" if win_rate >= 55 else ("🟡" if win_rate >= 45 else "🔴")
+        avg_emoji = "📈" if avg_pct >= 0 else "📉"
 
-        # Best / worst
-        best = stats.get("best")
-        worst = stats.get("worst")
+        lines += [
+            f"━━━━━ 📈 *10-ДНЕВНЫЕ* ({checked} рек.) ━━━━━",
+            f"{wr_emoji} Win rate (>0%): *{win_count}/{checked}* = *{win_rate}%*",
+            f"  ✅ Успех (>+3%):  *{success}*",
+            f"  ➖ Нейтрально:    *{neutral}*",
+            f"  ❌ Убыток (<-3%): *{failure}*",
+            f"{avg_emoji} Средний результат: *{avg_pct:+.2f}%*",
+        ]
+        best = stats_10d.get("best")
+        worst = stats_10d.get("worst")
         if best:
-            msg += f"\n🏆 Лучшая: *{best['ticker']}* ({best['result_pct']:+.2f}%) от {best['signal_date']}"
+            lines.append(f"🏆 Лучшая: *{best['ticker']}* {best['result_pct']:+.2f}% ({best['signal_date']})")
         if worst:
-            msg += f"\n💀 Худшая: *{worst['ticker']}* ({worst['result_pct']:+.2f}%) от {worst['signal_date']}"
+            lines.append(f"💀 Худшая: *{worst['ticker']}* {worst['result_pct']:+.2f}% ({worst['signal_date']})")
+        lines.append("")
 
-        # Score bins correlation
-        bins = stats.get("score_bins", [])
-        if bins:
-            msg += "\n\n*Score → Win rate:*\n"
-            for b in bins:
-                total_bin = b["total"]
-                successes = b["successes"]
-                win_rate = round(successes / total_bin * 100, 1) if total_bin > 0 else 0
-                msg += f"  {b['score_bin']}: {successes}/{total_bin} ({win_rate}%)\n"
+    # ── 30-ДНЕВНЫЕ РЕЗУЛЬТАТЫ ──────────────────────────────
+    if stats_30d and stats_30d.get("total", 0) > 0:
+        s30 = stats_30d
+        wr30_emoji = "🟢" if s30["win_rate"] >= 55 else ("🟡" if s30["win_rate"] >= 45 else "🔴")
+        lines += [
+            f"━━━━━ 📅 *30-ДНЕВНЫЕ* ({s30['total']} рек.) ━━━━━",
+            f"{wr30_emoji} Win rate: *{s30['win_rate']}%*  |  Avg: *{s30['avg_pct']:+.2f}%*",
+            f"  ✅ {s30['success']}  ➖ {s30['neutral']}  ❌ {s30['failure']}",
+        ]
+        if s30.get("best"):
+            lines.append(f"🏆 {s30['best']['ticker']} *{s30['best']['pct']:+.2f}%*"
+                         f"  💀 {s30['worst']['ticker']} *{s30['worst']['pct']:+.2f}%*")
+        if s30.get("pending", 0) > 0:
+            lines.append(f"⏳ Ожидают проверки: {s30['pending']}")
+        lines.append("")
+    elif stats_30d is not None:
+        pending_30d = stats_30d.get("pending", 0)
+        lines += [
+            "━━━━━ 📅 *30-ДНЕВНЫЕ* ━━━━━",
+            f"Данных ещё нет  |  Ожидают: {pending_30d}",
+            "",
+        ]
 
-    return msg
+    # ── СИМУЛЯЦИЯ ПОРТФЕЛЯ ────────────────────────────────
+    if perf and perf.get("simulated"):
+        sim = perf["simulated"]
+        pnl_emoji = "📈" if (sim.get("total_pnl", 0) or 0) >= 0 else "📉"
+        lines += [
+            f"━━━━━ 💹 *СИМУЛЯЦИЯ* ($1000/сделку, SL {sim.get('max_loss_per_trade', -8)}%) ━━━━━",
+            f"Сделок: {sim['trades']}  |  Вложено: ${sim['invested']:,.0f}",
+            f"{pnl_emoji} P&L: *${sim['total_pnl']:+,.2f}* (*{sim['portfolio_return_pct']:+.2f}%*)",
+            f"Win rate: *{sim['win_rate']}%*  |  Avg/сделку: *{sim['avg_per_trade']:+.2f}%*",
+            "",
+        ]
+
+    # ── PAPER TRADING ─────────────────────────────────────
+    mode_labels = {"auto": "🤖 Авто", "hybrid": "🔀 Гибрид", "off": "⏸ Отключён"}
+    mode_label = mode_labels.get(paper_mode, paper_mode)
+    if paper and (paper.get("total", 0) > 0 or paper_mode != "off"):
+        open_c = paper.get("open_count", 0)
+        closed_c = paper.get("closed_count", 0)
+        skipped_c = paper.get("skipped_count", 0)
+        lines += [f"━━━━━ 🤖 *PAPER TRADING* ({mode_label}) ━━━━━"]
+        lines.append(f"Открыто: {open_c}  |  Закрыто: {closed_c}  |  Пропущено: {skipped_c}")
+        if closed_c > 0:
+            wr_p = paper.get("win_rate", 0)
+            avg_p = paper.get("avg_pl_pct", 0)
+            pl_p = paper.get("total_realized_pl", 0)
+            lines.append(f"Win rate: *{wr_p:.1f}%*  |  Avg: *{avg_p:+.2f}%*  |  P&L: *${pl_p:+.2f}*")
+        lines.append("Детали: `/paper`")
+        lines.append("")
+
+    # ── SCORE BINS ────────────────────────────────────────
+    bins = stats_10d.get("score_bins", [])
+    if bins and checked > 0:
+        lines += ["━━━━━ 🔬 *SCORE → РЕЗУЛЬТАТ* ━━━━━"]
+        for b in bins:
+            t = b["total"]
+            s = b["successes"]
+            wr = round(s / t * 100, 1) if t > 0 else 0
+            bar = "🟢" if wr >= 55 else ("🟡" if wr >= 40 else "🔴")
+            lines.append(f"  {bar} Score {b['score_bin']}: {s}/{t} = {wr}%")
+        lines.append("")
+
+    lines.append("📈 `/performance` — подробная симуляция  |  `/chart` — графики")
+    return "\n".join(lines)
 
 
 def format_check_results(results: list[dict], period: str = "10д") -> str:
@@ -384,11 +456,12 @@ def format_snapshot_digest(snapshot: dict) -> str:
     avg_emoji = "📈" if avg >= 0 else "📉"
     wr_emoji = "🟢" if wr >= 55 else ("🟡" if wr >= 45 else "🔴")
 
-    msg = f"📊 *Динамика рекомендаций* — {date}\n"
-    msg += f"Отслеживается: *{total}* активных позиций _(нереализованные)_\n\n"
+    msg = f"📸 *Снимок портфеля* — {date}\n"
+    msg += f"_(авто-трекинг активных рекомендаций, нереализованные данные)_\n\n"
+    msg += f"Позиций в трекинге: *{total}*\n"
     msg += f"{avg_emoji} Средний P&L сейчас: *{avg:+.2f}%*\n"
     msg += f"{wr_emoji} В плюсе: *{wins}* | Около нуля: *{flat}* | В минусе: *{losses}*\n"
-    msg += f"В плюсе сейчас: *{wr}%* _(live, не финальный)_\n"
+    msg += f"Доля в плюсе: *{wr}%* _(живые цены, не финал)_\n"
 
     # Age breakdown
     fresh_avg = snapshot.get("fresh_avg")

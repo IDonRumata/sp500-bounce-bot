@@ -862,6 +862,47 @@ def get_stats_summary() -> dict:
     }
 
 
+def get_30d_summary() -> dict:
+    """Summary statistics for 30-day checked recommendations."""
+    conn = get_connection()
+
+    pending_30d = conn.execute(
+        "SELECT COUNT(*) as cnt FROM recommendations WHERE status_30d = 'pending_30d'"
+    ).fetchone()["cnt"]
+
+    rows = conn.execute("""
+        SELECT ticker, signal_date, result_pct_30d, status_30d
+        FROM recommendations
+        WHERE status_30d NOT IN ('pending_30d')
+        AND result_pct_30d IS NOT NULL
+    """).fetchall()
+
+    conn.close()
+
+    if not rows:
+        return {"total": 0, "pending": pending_30d}
+
+    pcts = [r["result_pct_30d"] for r in rows]
+    wins = [p for p in pcts if p > 0]
+    success = sum(1 for r in rows if r["status_30d"] == "success_30d")
+    neutral = sum(1 for r in rows if r["status_30d"] == "neutral_30d")
+    failure = sum(1 for r in rows if r["status_30d"] == "failure_30d")
+    best = max(rows, key=lambda r: r["result_pct_30d"])
+    worst = min(rows, key=lambda r: r["result_pct_30d"])
+
+    return {
+        "total": len(rows),
+        "pending": pending_30d,
+        "success": success,
+        "neutral": neutral,
+        "failure": failure,
+        "avg_pct": round(sum(pcts) / len(pcts), 2),
+        "win_rate": round(len(wins) / len(pcts) * 100, 1),
+        "best": {"ticker": best["ticker"], "pct": best["result_pct_30d"], "date": best["signal_date"]},
+        "worst": {"ticker": worst["ticker"], "pct": worst["result_pct_30d"], "date": worst["signal_date"]},
+    }
+
+
 def get_all_checked_recommendations() -> list[dict]:
     """Return all checked (non-pending) recommendations for charting."""
     conn = get_connection()
