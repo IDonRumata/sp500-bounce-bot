@@ -2,8 +2,11 @@ import re
 import asyncio
 from datetime import datetime
 import telegram
-from telegram import Update, BotCommand, MenuButtonCommands, Bot as TgBot
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import (
+    Update, BotCommand, MenuButtonCommands, Bot as TgBot,
+    InlineKeyboardButton, InlineKeyboardMarkup,
+)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
 
 from config import (
@@ -17,6 +20,7 @@ from bot.formatters import (
     format_alerts, format_portfolio, format_portfolio_history,
     format_backtest, format_entry_signals, format_exit_signals,
     format_performance, format_snapshot_digest,
+    format_paper_dashboard, format_paper_approval_message,
 )
 from storage.database import (
     get_last_report, get_watchlist,
@@ -24,6 +28,9 @@ from storage.database import (
     get_stats_summary,
     register_user, get_user, get_all_active_users,
     get_subscribed_users, update_user_setting,
+    get_setting, set_setting,
+    get_paper_trades_stats, get_paper_trade_by_id,
+    reject_paper_trade, update_paper_trade_open, update_paper_trade_error,
 )
 from evaluation.check_results import check_pending_results, check_pending_30d_results, snapshot_all_recommendations
 
@@ -700,7 +707,364 @@ async def _run_backtest_background(bot, chat_id, days=None, date=None):
         await _safe_send(bot, chat_id, "❌ *Ошибка бэктеста.* Повторите позже.")
 
 
-# ---- Scheduled Report ----
+# ── Paper Trading Commands ──────────────────────────────────────────────────────
+
+async def cmd_paper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/paper — show paper trading dashboard."""
+    if not _is_authorized(update):
+        return
+    chat_id = str(update.effective_chat.id)
+
+    await update.message.reply_text("🔄 Загружаю данные paper trading...")
+
+    try:
+        from trading.alpaca_executor import AlpacaExecutor
+        executor = AlpacaExecutor.get_instance()
+
+        mode = get_setting("paper_trading_mode", "off")
+        stats = await asyncio.get_event_loop().run_in_executor(None, get_paper_trades_stats)
+        account = await asyncio.get_event_loop().run_in_executor(
+            None, executor.get_account
+        ) if executor else {}
+        positions = await asyncio.get_event_loop().run_in_executor(
+            None, executor.get_open_positions
+        ) if executor else []
+
+        msg = format_paper_dashboard(mode, account, stats, positions)
+        await _safe_send(context.bot, chat_id, msg)
+    except Exception as e:
+        logger.error(f"cmd_paper failed: {e}", exc_info=True)
+        await _safe_send(context.bot, chat_id, f"❌ Ошибка: {e}")
+
+
+async def cmd_paper_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/paper_mode [auto|hybrid|off] — switch paper trading mode (admin only)."""
+    if not _is_authorized(update) or not _is_admin(update):
+        await update.message.reply_text("⛔ Только для администратора.")
+        return
+
+    chat_id = str(update.effective_chat.id)
+    args = context.args or []
+
+    current = get_setting("paper_trading_mode", "off")
+
+    if not args:
+        mode_labels = {"auto": "🤖 Авто", "hybrid": "🔀 Гибрид", "off": "⏸ Отключён"}
+        await update.message.reply_text(
+            f"📌 Текущий режим: *{mode_labels.get(current, current)}*\n\n"
+            f"Доступные режимы:\n"
+            f"• `/paper_mode auto` — автоматически исполнять все рекомендации\n"
+            f"• `/paper_mode hybrid` — подтверждать каждую сделку вручную\n"
+            f"• `/paper_mode off` — отключить paper trading",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    new_mode = args[0].lower()
+    if new_mode not in ("auto", "hybrid", "off"):
+        await update.message.reply_text("❌ Допустимые значения: `auto`, `hybrid`, `off`",
+                                         parse_mode=ParseMode.MARKDOWN)
+        return
+
+    set_setting("paper_trading_mode", new_mode)
+    mode_labels = {"auto": "🤖 Авто", "hybrid": "🔀 Гибрид", "off": "⏸ Отключён"}
+    await update.message.reply_text(
+        f"✅ Режим paper trading изменён:\n"
+        f"{mode_labels.get(current, current)} → *{mode_labels.get(new_mode, new_mode)}*",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    logger.info(f"Paper trading mode changed: {current} → {new_mode} by {chat_id}")
+
+
+async def paper_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline button callbacks for Hybrid mode approve/reject."""
+    query = update.callback_query
+    await query.answer()
+
+    if not query.data:
+        return
+
+    # Expected format: paper_approve_<trade_id> or paper_reject_<trade_id>
+    parts = query.data.split("_")
+    if len(parts) != 3 or parts[0] != "paper":
+        return
+
+    action = parts[1]   # "approve" or "reject"
+    try:
+        trade_id = int(parts[2])
+    except ValueError:
+        return
+
+    trade = get_paper_trade_by_id(trade_id)
+    if not trade:
+        await query.edit_message_text("❌ Сделка не найдена.")
+        return
+
+    if trade["status"] != "pending_approval":
+        await query.edit_message_text(
+            f"⚠️ Сделка {trade['symbol']} уже обработана (статус: {trade['status']})"
+        )
+        return
+
+    if action == "reject":
+        reject_paper_trade(trade_id)
+        await query.edit_message_text(
+            f"❌ *{trade['symbol']}* — сделка отклонена.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        logger.info(f"Paper trade {trade_id} ({trade['symbol']}) rejected by user")
+        return
+
+    if action == "approve":
+        await query.edit_message_text(
+            f"⏳ *{trade['symbol']}* — исполняю ордер...",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        try:
+            from trading.alpaca_executor import AlpacaExecutor, PAPER_POSITION_SIZE_USD
+            executor = AlpacaExecutor.get_instance()
+            if not executor:
+                await query.edit_message_text(
+                    f"❌ Alpaca API недоступен. Проверь ALPACA_API_KEY в .env"
+                )
+                return
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: executor.open_position(
+                    trade["symbol"], trade.get("notional_usd", PAPER_POSITION_SIZE_USD)
+                )
+            )
+
+            if result["status"] == "success":
+                update_paper_trade_open(
+                    trade_id,
+                    order_id=result["order_id"],
+                    entry_price=result.get("filled_price"),
+                    qty=result.get("qty"),
+                )
+                price_str = f"${result['filled_price']:.2f}" if result.get("filled_price") else "ожидает открытия рынка"
+                await query.edit_message_text(
+                    f"✅ *{trade['symbol']}* — ордер исполнен!\n"
+                    f"  Цена входа: {price_str}\n"
+                    f"  SL: ${trade.get('stop_loss_price', '?')}\n"
+                    f"  Order ID: `{result['order_id']}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.info(f"Paper trade {trade_id} ({trade['symbol']}) approved & executed")
+            else:
+                update_paper_trade_error(trade_id, result.get("error", "unknown"))
+                await query.edit_message_text(
+                    f"❌ *{trade['symbol']}* — ошибка ордера: {result.get('error')}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+        except Exception as e:
+            logger.error(f"paper_callback approve error: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка исполнения: {e}")
+
+
+async def _execute_paper_trades(bot, stocks: list[dict], signal_date: str):
+    """
+    Called after recommendations are generated.
+    In 'auto' mode: executes all trades immediately.
+    In 'hybrid' mode: sends approval buttons for each trade.
+    In 'off' mode: does nothing.
+    """
+    from config import PAPER_POSITION_SIZE_USD, PAPER_HYBRID_TIMEOUT_HOURS, TELEGRAM_CHAT_ID
+    from storage.database import save_paper_trade
+    from trading.alpaca_executor import AlpacaExecutor
+
+    mode = get_setting("paper_trading_mode", "off")
+    if mode == "off" or not stocks:
+        return
+
+    executor = AlpacaExecutor.get_instance() if mode == "auto" else None
+    admin_id = TELEGRAM_CHAT_ID
+
+    logger.info(f"[PaperTrading] Mode={mode}, processing {len(stocks)} recommendations")
+
+    for stock in stocks:
+        symbol = stock.get("symbol") or stock.get("ticker", "?")
+        scores = stock.get("scores", {})
+        tech = stock.get("technical", {})
+        score = scores.get("composite_score", 0.0)
+        price = tech.get("current_price", 0.0) or 0.0
+        sl_pct = -8.0
+        tp_pct = 15.0
+        sl_price = round(price * (1 + sl_pct / 100), 2) if price else None
+        tp_price = round(price * (1 + tp_pct / 100), 2) if price else None
+
+        try:
+            if mode == "auto":
+                # Create record first
+                trade_id = save_paper_trade(
+                    symbol=symbol,
+                    notional_usd=PAPER_POSITION_SIZE_USD,
+                    signal_date=signal_date,
+                    signal_score=score,
+                    stop_loss_price=sl_price,
+                    take_profit_price=tp_price,
+                    status="pending",
+                )
+                # Execute immediately
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda s=symbol: executor.open_position(s, PAPER_POSITION_SIZE_USD)
+                )
+                if result["status"] == "success":
+                    update_paper_trade_open(
+                        trade_id,
+                        order_id=result["order_id"],
+                        entry_price=result.get("filled_price"),
+                        qty=result.get("qty"),
+                    )
+                    logger.info(f"[PaperTrading] AUTO executed: {symbol} order_id={result['order_id']}")
+                else:
+                    update_paper_trade_error(trade_id, result.get("error", "auto exec failed"))
+                    logger.warning(f"[PaperTrading] AUTO failed: {symbol} — {result.get('error')}")
+
+            elif mode == "hybrid":
+                # Create record with pending_approval status
+                trade_id = save_paper_trade(
+                    symbol=symbol,
+                    notional_usd=PAPER_POSITION_SIZE_USD,
+                    signal_date=signal_date,
+                    signal_score=score,
+                    stop_loss_price=sl_price,
+                    take_profit_price=tp_price,
+                    status="pending_approval",
+                )
+                # Send approval message with inline keyboard
+                msg = format_paper_approval_message(
+                    symbol=symbol,
+                    score=score,
+                    price=price,
+                    stop_loss=sl_price,
+                    take_profit=tp_price,
+                    trade_id=trade_id,
+                    mode_timeout_h=PAPER_HYBRID_TIMEOUT_HOURS,
+                )
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(f"✅ Купить {symbol}", callback_data=f"paper_approve_{trade_id}"),
+                        InlineKeyboardButton("❌ Пропустить", callback_data=f"paper_reject_{trade_id}"),
+                    ]
+                ])
+                if admin_id:
+                    try:
+                        await bot.send_message(
+                            chat_id=int(admin_id),
+                            text=msg,
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=keyboard,
+                        )
+                        logger.info(f"[PaperTrading] HYBRID approval sent: {symbol} trade_id={trade_id}")
+                    except Exception as e:
+                        logger.warning(f"[PaperTrading] Could not send approval for {symbol}: {e}")
+
+                # Schedule auto-cancel after timeout
+                async def _auto_cancel(tid=trade_id, sym=symbol):
+                    await asyncio.sleep(PAPER_HYBRID_TIMEOUT_HOURS * 3600)
+                    from storage.database import get_paper_trade_by_id
+                    t = get_paper_trade_by_id(tid)
+                    if t and t["status"] == "pending_approval":
+                        from storage.database import update_paper_trade_error
+                        update_paper_trade_error(tid, "hybrid_timeout")
+                        logger.info(f"[PaperTrading] HYBRID timeout cancelled: {sym} trade_id={tid}")
+                        if admin_id:
+                            try:
+                                await bot.send_message(
+                                    chat_id=int(admin_id),
+                                    text=f"⏰ *{sym}* — время истекло, сделка отменена автоматически.",
+                                    parse_mode=ParseMode.MARKDOWN,
+                                )
+                            except Exception:
+                                pass
+
+                task = asyncio.create_task(_auto_cancel())
+                _bg_tasks.add(task)
+                task.add_done_callback(_bg_tasks.discard)
+
+        except Exception as e:
+            logger.error(f"[PaperTrading] Error processing {symbol}: {e}", exc_info=True)
+
+
+# ── Paper Trading SL/TP Monitor (called from check_results_job) ─────────────────
+
+async def check_paper_sl_tp(bot):
+    """
+    Check open paper trades for SL/TP hits.
+    Called daily after market close from check_results_job.
+    """
+    from config import STOP_LOSS_PCT, TAKE_PROFIT_PCT, TELEGRAM_CHAT_ID
+    from storage.database import get_open_paper_trades, close_paper_trade
+    from trading.alpaca_executor import AlpacaExecutor
+
+    executor = AlpacaExecutor.get_instance()
+    if not executor:
+        return
+
+    open_trades = get_open_paper_trades()
+    if not open_trades:
+        return
+
+    logger.info(f"[PaperSL/TP] Checking {len(open_trades)} open trades")
+    import yfinance as yf
+
+    for trade in open_trades:
+        symbol = trade["symbol"]
+        entry_price = trade.get("entry_price")
+        sl_price = trade.get("stop_loss_price")
+        tp_price = trade.get("take_profit_price")
+
+        if not entry_price:
+            continue
+
+        try:
+            ticker = yf.Ticker(symbol)
+            current_price = ticker.fast_info.get("last_price") or ticker.fast_info.last_price
+            if not current_price:
+                continue
+
+            hit_sl = sl_price and current_price <= sl_price
+            hit_tp = tp_price and current_price >= tp_price
+
+            if hit_sl or hit_tp:
+                reason = "SL" if hit_sl else "TP"
+                # Close on Alpaca
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda s=symbol: executor.close_position(s)
+                )
+                exit_price = result.get("filled_price") or current_price
+                exit_order = result.get("order_id")
+
+                close_paper_trade(trade["id"], exit_price, reason, exit_order)
+                pl_pct = round((exit_price - entry_price) / entry_price * 100, 2)
+                sign = "+" if pl_pct >= 0 else ""
+                emoji = "🟢" if pl_pct >= 0 else "🔴"
+
+                logger.info(f"[PaperSL/TP] Closed {symbol} via {reason}: {sign}{pl_pct:.2f}%")
+
+                if TELEGRAM_CHAT_ID:
+                    try:
+                        await bot.send_message(
+                            chat_id=int(TELEGRAM_CHAT_ID),
+                            text=(
+                                f"{emoji} *Paper Trade закрыта ({reason})*\n\n"
+                                f"📌 {symbol}\n"
+                                f"  Вход: ${entry_price:.2f}\n"
+                                f"  Выход: ${exit_price:.2f}\n"
+                                f"  P&L: {sign}{pl_pct:.2f}%"
+                            ),
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                    except Exception as e:
+                        logger.warning(f"SL/TP notify failed for {symbol}: {e}")
+
+        except Exception as e:
+            logger.warning(f"[PaperSL/TP] Error checking {symbol}: {e}")
+
+
+# ── Scheduled Report ──────────────────────────────────────────────────────────
 
 async def scheduled_report_job(context: ContextTypes.DEFAULT_TYPE):
     """Job callback for python-telegram-bot's job_queue (replaces APScheduler)."""
@@ -747,6 +1111,14 @@ async def send_scheduled_report(bot):
                     await _safe_send(bot, cid, msg_ai)
                 except Exception as e:
                     logger.warning(f"Failed to send report to {cid}: {e}")
+
+            # Paper trading: execute or request approval for each recommendation
+            try:
+                from datetime import date as _date
+                signal_date = _date.today().isoformat()
+                await _execute_paper_trades(bot, result["stocks"], signal_date)
+            except Exception as e:
+                logger.error(f"Paper trading execution failed: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Scheduled report failed: {e}", exc_info=True)
@@ -801,6 +1173,12 @@ async def check_results_job(context: ContextTypes.DEFAULT_TYPE):
             logger.info("No pending 30d results to report")
     except Exception as e:
         logger.error(f"Check results (30d) job failed: {e}", exc_info=True)
+
+    # Paper trading SL/TP check
+    try:
+        await check_paper_sl_tp(context.bot)
+    except Exception as e:
+        logger.error(f"Paper SL/TP check failed: {e}", exc_info=True)
 
 
 async def dynamic_snapshot_job(context: ContextTypes.DEFAULT_TYPE):
@@ -938,6 +1316,10 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("paper", cmd_paper))
+    app.add_handler(CommandHandler("paper_mode", cmd_paper_mode))
+    # Inline button callbacks for Hybrid mode approve/reject
+    app.add_handler(CallbackQueryHandler(paper_callback, pattern="^paper_"))
 
     logger.info("Telegram bot application created")
     return app

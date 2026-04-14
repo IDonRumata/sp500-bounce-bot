@@ -74,6 +74,15 @@ SECTOR_ETFS = {
     "Materials": "XLB",
 }
 
+# --- Paper Trading (Alpaca) ---
+# Get keys from: https://app.alpaca.markets → API → Paper Trading
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
+PAPER_POSITION_SIZE_USD = float(os.getenv("PAPER_POSITION_SIZE_USD", "1000.0"))
+PAPER_INITIAL_BALANCE = float(os.getenv("PAPER_INITIAL_BALANCE", "100000.0"))
+PAPER_HYBRID_TIMEOUT_HOURS = float(os.getenv("PAPER_HYBRID_TIMEOUT_HOURS", "4.0"))
+# paper_trading_mode is stored in DB (bot_settings) to allow runtime switching
+
 # --- Security: Authorized Telegram users ---
 _auth_ids = os.getenv("AUTHORIZED_CHAT_IDS", "")
 AUTHORIZED_CHAT_IDS = set(s.strip() for s in _auth_ids.split(",") if s.strip())

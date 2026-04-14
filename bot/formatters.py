@@ -674,3 +674,119 @@ def format_status(last_run: str | None, next_run: str | None, uptime: str) -> st
 📅 Последний запуск: {last_run or 'нет'}
 ⏰ Следующий запуск: {next_run or 'по расписанию'}
 ✅ Бот работает"""
+
+
+# ── Paper Trading Dashboard ──────────────────────────────────────────────────────
+
+def format_paper_dashboard(
+    mode: str,
+    account: dict,
+    stats: dict,
+    alpaca_positions: list[dict],
+) -> str:
+    """
+    Format the /paper command dashboard.
+    Shows: mode, account equity, open positions, closed trades summary.
+    """
+    mode_labels = {
+        "auto":   "🤖 Авто — все рекомендации исполняются автоматически",
+        "hybrid": "🔀 Гибрид — ты подтверждаешь каждую сделку",
+        "off":    "⏸ Отключён",
+    }
+    mode_label = mode_labels.get(mode, mode)
+
+    lines = [
+        "📈 *Paper Trading — Alpaca*",
+        f"Режим: {mode_label}",
+        "",
+    ]
+
+    # Account block (from Alpaca API)
+    if account:
+        equity = account.get("equity", 0)
+        initial = account.get("initial_balance", 100_000)
+        total_pl = account.get("total_pl", 0)
+        total_pl_pct = account.get("total_pl_pct", 0)
+        cash = account.get("cash", 0)
+
+        pl_sign = "+" if total_pl >= 0 else ""
+        pl_emoji = "📈" if total_pl >= 0 else "📉"
+        lines += [
+            f"💼 *Счёт Alpaca*",
+            f"  Начальный капитал: ${initial:,.0f}",
+            f"  Equity: ${equity:,.2f}",
+            f"  Кэш: ${cash:,.2f}",
+            f"  {pl_emoji} P&L: {pl_sign}${total_pl:,.2f} ({pl_sign}{total_pl_pct:.2f}%)",
+            "",
+        ]
+    else:
+        lines += ["⚠️ _Alpaca API недоступен_", ""]
+
+    # Open positions from Alpaca
+    if alpaca_positions:
+        lines.append(f"🔓 *Открытые позиции ({len(alpaca_positions)})*")
+        for p in alpaca_positions:
+            pl = p.get("unrealized_pl", 0) or 0
+            plpc = p.get("unrealized_plpc", 0) or 0
+            sign = "+" if pl >= 0 else ""
+            emoji = "🟢" if pl >= 0 else "🔴"
+            lines.append(
+                f"  {emoji} {p['symbol']}: {sign}${pl:.1f} ({sign}{plpc:.1f}%)"
+            )
+        lines.append("")
+    else:
+        lines += ["🔓 Открытых позиций нет", ""]
+
+    # Closed trades summary (from DB)
+    closed = stats.get("closed_count", 0)
+    skipped = stats.get("skipped_count", 0)
+    total_pl_closed = stats.get("total_realized_pl", 0.0)
+    win_rate = stats.get("win_rate", 0.0)
+    avg_pct = stats.get("avg_pl_pct", 0.0)
+
+    lines.append(f"📊 *Статистика закрытых сделок ({closed})*")
+    if closed > 0:
+        pl_sign = "+" if total_pl_closed >= 0 else ""
+        avg_sign = "+" if avg_pct >= 0 else ""
+        lines += [
+            f"  Win rate: {win_rate:.1f}%",
+            f"  Avg P&L: {avg_sign}{avg_pct:.2f}%",
+            f"  Всего P&L: {pl_sign}${total_pl_closed:,.2f}",
+        ]
+        best = stats.get("best_trade")
+        worst = stats.get("worst_trade")
+        if best:
+            lines.append(f"  🏆 Лучшая: {best['symbol']} +{best['pct']:.2f}% ({best.get('reason','?')})")
+        if worst:
+            lines.append(f"  💥 Худшая: {worst['symbol']} {worst['pct']:.2f}% ({worst.get('reason','?')})")
+    else:
+        lines.append("  Закрытых сделок ещё нет")
+
+    lines += ["", f"⏭ Пропущено/отклонено: {skipped}"]
+    lines += ["", "─────────────────────────", "💡 `/paper_mode auto|hybrid|off` — сменить режим"]
+
+    return "\n".join(lines)
+
+
+def format_paper_approval_message(
+    symbol: str,
+    score: float,
+    price: float,
+    stop_loss: float | None,
+    take_profit: float | None,
+    trade_id: int,
+    mode_timeout_h: float = 4.0,
+) -> str:
+    """Message sent in Hybrid mode asking to approve/reject a paper trade."""
+    sl_str = f"${stop_loss:.2f}" if stop_loss else "N/A"
+    tp_str = f"${take_profit:.2f}" if take_profit else "N/A"
+    return (
+        f"🔀 *Hybrid Mode — Подтвердить сделку?*\n\n"
+        f"📌 *{symbol}*\n"
+        f"  Score: {score:.1f}\n"
+        f"  Цена: ${price:.2f}\n"
+        f"  SL: {sl_str} | TP: {tp_str}\n"
+        f"  Размер позиции: $1,000\n\n"
+        f"_Автоматическая отмена через {mode_timeout_h:.0f}ч если не ответишь_\n"
+        f"Trade ID: `{trade_id}`"
+    )

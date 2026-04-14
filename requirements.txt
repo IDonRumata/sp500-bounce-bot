@@ -8,4 +8,5 @@ python-dotenv>=1.0
 beautifulsoup4>=4.12
 lxml>=4.9
 matplotlib>=3.7
+alpaca-py>=0.20.0
 pytest>=7.0

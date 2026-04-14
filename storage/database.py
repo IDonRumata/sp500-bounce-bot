@@ -220,11 +220,59 @@ def init_db():
     except Exception as e:
         logger.warning(f"SL/TP backfill note: {e}")
 
+    # Phase 3d: Paper trading table (Alpaca integration)
+    _safe_create_table(conn, """
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id INTEGER REFERENCES recommendations(id),
+            symbol TEXT NOT NULL,
+            notional_usd REAL NOT NULL,
+            qty REAL,
+            entry_price REAL,
+            entry_time TEXT,
+            exit_price REAL,
+            exit_time TEXT,
+            exit_reason TEXT,
+            realized_pl REAL,
+            realized_pl_pct REAL,
+            alpaca_entry_order_id TEXT,
+            alpaca_exit_order_id TEXT,
+            status TEXT DEFAULT 'pending',
+            signal_score REAL,
+            signal_date TEXT,
+            stop_loss_price REAL,
+            take_profit_price REAL,
+            created_at TEXT DEFAULT (datetime('now')),
+            approved_at TEXT,
+            rejected_at TEXT
+        )
+    """)
+
+    # Phase 3e: Bot settings table (dynamic runtime config: paper trading mode, etc.)
+    _safe_create_table(conn, """
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    # Default paper trading mode = 'off' (user must explicitly enable)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('paper_trading_mode', 'off')"
+        )
+        conn.commit()
+    except Exception:
+        pass
+
     # Phase 4: Indexes on user_id columns (safe after migration)
     for idx_sql in [
         "CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_alerts_user_ticker ON alert_history(user_id, ticker, sent_at)",
         "CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status)",
+        "CREATE INDEX IF NOT EXISTS idx_paper_trades_symbol ON paper_trades(symbol)",
     ]:
         try:
             conn.execute(idx_sql)
@@ -905,3 +953,248 @@ def get_performance_stats(user_id: str) -> dict:
     conn.close()
 
     return {"theoretical": theoretical, "simulated": simulated, "actual": actual}
+
+
+# ── Bot Settings ────────────────────────────────────────────────────────────────
+
+def get_setting(key: str, default: str = "") -> str:
+    """Get a runtime setting from bot_settings table."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT value FROM bot_settings WHERE key = ?", (key,)
+    ).fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str):
+    """Upsert a runtime setting."""
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO bot_settings (key, value, updated_at)
+           VALUES (?, ?, datetime('now'))
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ── Paper Trading ───────────────────────────────────────────────────────────────
+
+def save_paper_trade(
+    symbol: str,
+    notional_usd: float,
+    signal_date: str,
+    signal_score: float,
+    stop_loss_price: float | None = None,
+    take_profit_price: float | None = None,
+    recommendation_id: int | None = None,
+    status: str = "pending_approval",
+) -> int:
+    """Create a new paper trade record. Returns the new trade id."""
+    conn = get_connection()
+    cursor = conn.execute(
+        """INSERT INTO paper_trades
+           (symbol, notional_usd, signal_date, signal_score,
+            stop_loss_price, take_profit_price, recommendation_id, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (symbol, notional_usd, signal_date, signal_score,
+         stop_loss_price, take_profit_price, recommendation_id, status),
+    )
+    trade_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return trade_id
+
+
+def update_paper_trade_open(
+    trade_id: int,
+    order_id: str,
+    entry_price: float | None,
+    qty: float | None,
+):
+    """Mark trade as open after order submitted/filled."""
+    conn = get_connection()
+    conn.execute(
+        """UPDATE paper_trades
+           SET status = 'open',
+               alpaca_entry_order_id = ?,
+               entry_price = ?,
+               qty = ?,
+               entry_time = datetime('now'),
+               approved_at = datetime('now')
+           WHERE id = ?""",
+        (order_id, entry_price, qty, trade_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_paper_trade_error(trade_id: int, error_msg: str):
+    """Mark trade as error (order submission failed)."""
+    conn = get_connection()
+    conn.execute(
+        """UPDATE paper_trades
+           SET status = 'error',
+               exit_reason = ?
+           WHERE id = ?""",
+        (error_msg[:200], trade_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def reject_paper_trade(trade_id: int):
+    """Mark trade as rejected (user declined in hybrid mode)."""
+    conn = get_connection()
+    conn.execute(
+        """UPDATE paper_trades
+           SET status = 'rejected',
+               rejected_at = datetime('now')
+           WHERE id = ?""",
+        (trade_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def close_paper_trade(
+    trade_id: int,
+    exit_price: float,
+    exit_reason: str,
+    order_id: str | None = None,
+):
+    """Close a paper trade and calculate realized P&L."""
+    conn = get_connection()
+    trade = conn.execute(
+        "SELECT entry_price, notional_usd FROM paper_trades WHERE id = ?", (trade_id,)
+    ).fetchone()
+
+    if trade and trade["entry_price"]:
+        entry = trade["entry_price"]
+        pl_pct = round((exit_price - entry) / entry * 100, 2)
+        pl_abs = round(trade["notional_usd"] * (pl_pct / 100.0), 2)
+    else:
+        pl_pct = None
+        pl_abs = None
+
+    conn.execute(
+        """UPDATE paper_trades
+           SET status = 'closed',
+               exit_price = ?,
+               exit_time = datetime('now'),
+               exit_reason = ?,
+               alpaca_exit_order_id = ?,
+               realized_pl = ?,
+               realized_pl_pct = ?
+           WHERE id = ?""",
+        (exit_price, exit_reason, order_id, pl_abs, pl_pct, trade_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_open_paper_trades() -> list[dict]:
+    """Return all currently open paper trades."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT * FROM paper_trades
+           WHERE status = 'open'
+           ORDER BY entry_time ASC"""
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_pending_approval_trades() -> list[dict]:
+    """Return trades waiting for hybrid-mode approval (not yet approved/rejected)."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT * FROM paper_trades
+           WHERE status = 'pending_approval'
+           ORDER BY created_at ASC"""
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_paper_trade_by_id(trade_id: int) -> dict | None:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM paper_trades WHERE id = ?", (trade_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_paper_trades_stats() -> dict:
+    """
+    Aggregate stats for paper trading dashboard:
+    - Total trades, open, closed, rejected/cancelled
+    - Win rate, avg P&L, best/worst trade
+    - Closed P&L vs starting $100k
+    """
+    conn = get_connection()
+
+    totals = conn.execute("""
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_count,
+            SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed_count,
+            SUM(CASE WHEN status IN ('rejected', 'cancelled') THEN 1 ELSE 0 END) as skipped_count,
+            SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count
+        FROM paper_trades
+    """).fetchone()
+
+    closed = conn.execute("""
+        SELECT symbol, realized_pl, realized_pl_pct, entry_price, exit_price, exit_reason
+        FROM paper_trades
+        WHERE status = 'closed' AND realized_pl_pct IS NOT NULL
+    """).fetchall()
+
+    open_trades = conn.execute("""
+        SELECT symbol, entry_price, notional_usd, entry_time, signal_score,
+               stop_loss_price, take_profit_price
+        FROM paper_trades
+        WHERE status = 'open'
+        ORDER BY entry_time ASC
+    """).fetchall()
+
+    conn.close()
+
+    stats = {
+        "total": totals["total"] if totals else 0,
+        "open_count": totals["open_count"] if totals else 0,
+        "closed_count": totals["closed_count"] if totals else 0,
+        "skipped_count": totals["skipped_count"] if totals else 0,
+        "error_count": totals["error_count"] if totals else 0,
+        "open_trades": [dict(r) for r in open_trades],
+        "closed_trades_summary": [],
+        "total_realized_pl": 0.0,
+        "win_rate": 0.0,
+        "avg_pl_pct": 0.0,
+        "best_trade": None,
+        "worst_trade": None,
+    }
+
+    if closed:
+        pls = [r["realized_pl"] for r in closed]
+        pcts = [r["realized_pl_pct"] for r in closed]
+        wins = [p for p in pcts if p > 0]
+        best = max(closed, key=lambda r: r["realized_pl_pct"])
+        worst = min(closed, key=lambda r: r["realized_pl_pct"])
+
+        stats["total_realized_pl"] = round(sum(pls), 2)
+        stats["win_rate"] = round(len(wins) / len(pcts) * 100, 1) if pcts else 0.0
+        stats["avg_pl_pct"] = round(sum(pcts) / len(pcts), 2) if pcts else 0.0
+        stats["best_trade"] = {
+            "symbol": best["symbol"], "pct": best["realized_pl_pct"],
+            "reason": best["exit_reason"]
+        }
+        stats["worst_trade"] = {
+            "symbol": worst["symbol"], "pct": worst["realized_pl_pct"],
+            "reason": worst["exit_reason"]
+        }
+
+    return stats
