@@ -216,6 +216,17 @@ async def _run_analysis_background(bot, chat_id):
         await asyncio.sleep(1)
         await _safe_send(bot, chat_id, format_ai_analysis(result["llm_response"]))
 
+        # Paper trading: execute or request approval (same as scheduled report)
+        mode = get_setting("paper_trading_mode", "off")
+        if mode != "off" and result.get("stocks"):
+            try:
+                from datetime import date as _date
+                signal_date = _date.today().isoformat()
+                await _execute_paper_trades(bot, result["stocks"], signal_date)
+                logger.info(f"[PaperTrading] Triggered from /run, mode={mode}, stocks={len(result['stocks'])}")
+            except Exception as pe:
+                logger.error(f"Paper trading after /run failed: {pe}", exc_info=True)
+
     except Exception as e:
         logger.error(f"Run command failed: {e}", exc_info=True)
         await _safe_send(bot, chat_id, "❌ *Ошибка анализа.* Повторите позже.")
@@ -782,6 +793,97 @@ async def cmd_paper_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Paper trading mode changed: {current} → {new_mode} by {chat_id}")
 
 
+async def cmd_paper_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/paper_test — Alpaca connection diagnostics (admin only)."""
+    if not _is_authorized(update) or not _is_admin(update):
+        await update.message.reply_text("⛔ Только для администратора.")
+        return
+
+    await update.message.reply_text("🔍 Тестирую подключение к Alpaca...")
+
+    lines = ["*🔬 Диагностика Alpaca Paper Trading*\n"]
+
+    # 1. Check alpaca-py installed
+    try:
+        import alpaca
+        lines.append(f"✅ alpaca-py установлен (v{alpaca.__version__})")
+    except ImportError:
+        lines.append("❌ alpaca-py НЕ установлен → `pip install alpaca-py`")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 2. Check API keys in config
+    from config import ALPACA_API_KEY, ALPACA_SECRET_KEY, PAPER_POSITION_SIZE_USD
+    key_display = f"{ALPACA_API_KEY[:6]}...{ALPACA_API_KEY[-4:]}" if len(ALPACA_API_KEY) > 10 else "(пусто)"
+    secret_display = "✅ задан" if len(ALPACA_SECRET_KEY) > 10 else "❌ пустой"
+    lines.append(f"🔑 API Key: `{key_display}`")
+    lines.append(f"🔑 Secret: {secret_display}")
+    lines.append(f"💵 Position size: ${PAPER_POSITION_SIZE_USD:.0f}")
+
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        lines.append("\n❌ Ключи не заданы — добавьте ALPACA\\_API\\_KEY и ALPACA\\_SECRET\\_KEY в .env")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 3. Try connecting
+    try:
+        from trading.alpaca_executor import AlpacaExecutor
+        AlpacaExecutor.reset()  # force fresh connection with current keys
+        executor = AlpacaExecutor.get_instance()
+
+        if executor is None:
+            lines.append("\n❌ Не удалось инициализировать AlpacaExecutor")
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+            return
+
+        lines.append("✅ AlpacaExecutor инициализирован (paper=True)")
+
+        # 4. Fetch account
+        account = await asyncio.get_event_loop().run_in_executor(None, executor.get_account)
+
+        if not account:
+            lines.append("\n❌ get\\_account() вернул пустой результат — ошибка API")
+            lines.append("💡 Возможные причины:")
+            lines.append("  • Аккаунт Alpaca ещё не активирован ('In review')")
+            lines.append("  • Неверные API ключи (используются Live ключи вместо Paper)")
+            lines.append("  • Нет интернет-соединения с VPS до api.alpaca.markets")
+        else:
+            eq = account.get("equity", 0) or 0
+            cash = account.get("cash", 0) or 0
+            bp = account.get("buying_power", 0) or 0
+            pv = account.get("portfolio_value", 0) or 0
+
+            lines.append(f"\n✅ Аккаунт получен:")
+            lines.append(f"  Equity: ${eq:,.2f}")
+            lines.append(f"  Portfolio: ${pv:,.2f}")
+            lines.append(f"  Cash: ${cash:,.2f}")
+            lines.append(f"  Buying power: ${bp:,.2f}")
+
+            if eq < 100:
+                lines.append(f"\n⚠️ *Equity < $100* — скорее всего это Live аккаунт!")
+                lines.append("  Paper аккаунт начинается с $100,000.")
+                lines.append("  Убедитесь что ключи взяты из *Paper Trading* секции Alpaca.")
+                lines.append("  Сайт paper аккаунта: paper.alpaca.markets")
+            elif eq < 50000:
+                lines.append(f"\n⚠️ Баланс ниже ожидаемого — возможно были сделки")
+            else:
+                lines.append(f"\n✅ Баланс в норме — paper аккаунт активен!")
+
+        # 5. Current mode and DB stats
+        mode = get_setting("paper_trading_mode", "off")
+        stats = await asyncio.get_event_loop().run_in_executor(None, get_paper_trades_stats)
+        total = (stats.get("total_trades", 0) or 0)
+        open_t = (stats.get("open_trades", 0) or 0)
+        lines.append(f"\n📋 Режим: *{mode.upper()}*")
+        lines.append(f"📊 Сделок в БД: {total} всего, {open_t} открытых")
+
+    except Exception as e:
+        lines.append(f"\n❌ Ошибка подключения: `{e}`")
+        logger.error(f"[PaperTest] {e}", exc_info=True)
+
+    await _safe_send(context.bot, str(update.effective_chat.id), "\n".join(lines))
+
+
 async def paper_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline button callbacks for Hybrid mode approve/reject."""
     query = update.callback_query
@@ -1331,6 +1433,7 @@ def create_bot_application() -> Application:
     app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CommandHandler("paper", cmd_paper))
     app.add_handler(CommandHandler("paper_mode", cmd_paper_mode))
+    app.add_handler(CommandHandler("paper_test", cmd_paper_test))
     # Inline button callbacks for Hybrid mode approve/reject
     app.add_handler(CallbackQueryHandler(paper_callback, pattern="^paper_"))
 

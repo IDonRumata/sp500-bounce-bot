@@ -318,6 +318,7 @@ async def main():
             BotCommand("settings", "Мои настройки"),
             BotCommand("paper", "Paper Trading — Alpaca"),
             BotCommand("paper_mode", "Режим paper trading (auto/hybrid/off)"),
+            BotCommand("paper_test", "Диагностика Alpaca подключения"),
             BotCommand("status", "Статус бота"),
             BotCommand("help", "Справка"),
         ])
